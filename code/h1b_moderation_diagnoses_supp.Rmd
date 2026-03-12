@@ -1,0 +1,475 @@
+---
+title: "INTRuST CM — H1b Supplementary: Robustness of Moderation Analyses"
+author: "Luisa Berger"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+
+suppressPackageStartupMessages({
+  library(here)
+  library(tidyverse)
+  library(fastDummies)
+  library(sandwich)
+  library(lmtest)
+  library(gt)
+  library(boot)
+  library(glue)
+})
+
+set.seed(1234)
+
+dat <- readr::read_csv(
+  here("data", "analysis_simulated.csv"),
+  show_col_types = FALSE,
+  name_repair = "minimal"
+)
+
+dat$gender     <- as.numeric(dat$gender)
+dat$tbi.diagnosis  <- as.numeric(dat$tbi.diagnosis)
+dat$ptsd.diagnosis <- as.numeric(dat$ptsd.diagnosis)
+dat$race       <- as.numeric(dat$race)
+
+# Dummy-code the 4-group diagnosis variable (reference group: HC)
+dat <- dummy_cols(dat, select_columns = "hc.ptsd.mtbi.groups.4groups")
+dat$hc.ptsd.mtbi.groups.4groups                        <- as.numeric(dat$hc.ptsd.mtbi.groups.4groups)
+dat$`hc.ptsd.mtbi.groups.4groups_mTBI-only`            <- as.numeric(dat$`hc.ptsd.mtbi.groups.4groups_mTBI-only`)
+dat$`hc.ptsd.mtbi.groups.4groups_PTSD-only`            <- as.numeric(dat$`hc.ptsd.mtbi.groups.4groups_PTSD-only`)
+dat$`hc.ptsd.mtbi.groups.4groups_Comorbid mTBI+PTSD`   <- as.numeric(dat$`hc.ptsd.mtbi.groups.4groups_Comorbid mTBI+PTSD`)
+```
+
+```{r define_settings, include=FALSE}
+X   <- "ctq_totalscore"
+COV <- c("age", "gender")
+
+# Named vector: column name in dat -> readable label used in output tables
+mod_map <- c(
+  "hc.ptsd.mtbi.groups.4groups_PTSD-only"          = "PTSD",
+  "hc.ptsd.mtbi.groups.4groups_mTBI-only"          = "mTBI",
+  "hc.ptsd.mtbi.groups.4groups_Comorbid mTBI+PTSD" = "PTSD+mTBI"
+)
+
+# Tracts significant in H1a (FDR p < .05), ordered by diffusion metric and tract
+tracts <- c(
+  # Mean diffusivity (MD)
+  "t_af_right.tensor1.meandiffusivity.mean",
+  "t_ilf_right.tensor1.meandiffusivity.mean",
+  "t_ioff_left.tensor1.meandiffusivity.mean",
+  "t_ioff_right.tensor1.meandiffusivity.mean",
+  "t_uf_right.tensor1.meandiffusivity.mean",
+  "t_cc1.tensor1.meandiffusivity.mean",
+  "t_cc2.tensor1.meandiffusivity.mean",
+  "t_cc6.tensor1.meandiffusivity.mean",
+  # Axial diffusivity (AD)
+  "t_af_left.tensor1.maxeigenvalue.mean",
+  "t_af_right.tensor1.maxeigenvalue.mean",
+  "t_cb_right.tensor1.maxeigenvalue.mean",
+  "t_ioff_left.tensor1.maxeigenvalue.mean",
+  "t_slf.i_left.tensor1.maxeigenvalue.mean",
+  "t_slf.i_right.tensor1.maxeigenvalue.mean",
+  "t_slf.ii_left.tensor1.maxeigenvalue.mean",
+  "t_slf.ii_right.tensor1.maxeigenvalue.mean",
+  "t_slf.iii_right.tensor1.maxeigenvalue.mean",
+  "t_cc2.tensor1.maxeigenvalue.mean",
+  "t_cc3.tensor1.maxeigenvalue.mean",
+  "t_cc4.tensor1.maxeigenvalue.mean",
+  "t_cc5.tensor1.maxeigenvalue.mean",
+  "t_cc6.tensor1.maxeigenvalue.mean"
+)
+
+# Maps raw column names to readable labels and display order within each metric group
+tract_map <- tibble::tribble(
+  ~Tract_raw,                                           ~Group, ~Tract_pretty,    ~Tract_order,
+  # MD
+  "t_af_right.tensor1.meandiffusivity.mean",            "MD",   "AF right",        1,
+  "t_cc1.tensor1.meandiffusivity.mean",                 "MD",   "CC 1",            2,
+  "t_cc2.tensor1.meandiffusivity.mean",                 "MD",   "CC 2",            3,
+  "t_cc6.tensor1.meandiffusivity.mean",                 "MD",   "CC 6",            4,
+  "t_ilf_right.tensor1.meandiffusivity.mean",           "MD",   "ILF right",       5,
+  "t_ioff_left.tensor1.meandiffusivity.mean",           "MD",   "IoFF left",       6,
+  "t_ioff_right.tensor1.meandiffusivity.mean",          "MD",   "IoFF right",      7,
+  "t_uf_right.tensor1.meandiffusivity.mean",            "MD",   "UF right",        8,
+  # AD
+  "t_af_left.tensor1.maxeigenvalue.mean",               "AD",   "AF left",         1,
+  "t_af_right.tensor1.maxeigenvalue.mean",              "AD",   "AF right",        2,
+  "t_cb_right.tensor1.maxeigenvalue.mean",              "AD",   "CB right",        3,
+  "t_cc2.tensor1.maxeigenvalue.mean",                   "AD",   "CC 2",            4,
+  "t_cc3.tensor1.maxeigenvalue.mean",                   "AD",   "CC 3",            5,
+  "t_cc4.tensor1.maxeigenvalue.mean",                   "AD",   "CC 4",            6,
+  "t_cc5.tensor1.maxeigenvalue.mean",                   "AD",   "CC 5",            7,
+  "t_cc6.tensor1.maxeigenvalue.mean",                   "AD",   "CC 6",            8,
+  "t_ioff_left.tensor1.maxeigenvalue.mean",             "AD",   "IoFF left",       9,
+  "t_slf.i_left.tensor1.maxeigenvalue.mean",            "AD",   "SLF I left",     10,
+  "t_slf.i_right.tensor1.maxeigenvalue.mean",           "AD",   "SLF I right",    11,
+  "t_slf.ii_left.tensor1.maxeigenvalue.mean",           "AD",   "SLF II left",    12,
+  "t_slf.ii_right.tensor1.maxeigenvalue.mean",          "AD",   "SLF II right",   13,
+  "t_slf.iii_right.tensor1.maxeigenvalue.mean",         "AD",   "SLF III right",  14
+)
+
+BOOT_R <- 5000   # number of bootstrap resamples (used identically in S7 and S8)
+
+# Check that expected tracts and moderators are present in the data
+available_tracts <- intersect(tracts, names(dat))
+dropped_tracts   <- setdiff(tracts, names(dat))
+available_mods   <- intersect(names(mod_map), names(dat))
+dropped_mods     <- setdiff(names(mod_map), names(dat))
+
+if (length(dropped_tracts)) message("Skipping missing tracts: ",    paste(dropped_tracts, collapse = ", "))
+if (length(dropped_mods))   message("Skipping missing moderators: ", paste(dropped_mods,  collapse = ", "))
+```
+
+```{r helpers, include=FALSE}
+# APA-style formatting helpers ─────────────────────────────────────────────────
+# All formatted strings use 3 decimal places and no leading zero.
+
+bt      <- function(x) paste0("`", x, "`")   # backtick-quote a column name for formula use
+strip0  <- function(s) gsub("(?<=^|-)0\\.", ".", s, perl = TRUE)
+fmt3    <- function(x) strip0(sprintf("%.3f", round(as.numeric(x), 3)))
+fmt_b   <- fmt3   # alias for unstandardised b (same precision and APA convention)
+apa_p   <- function(p) sub("^= 0\\.", "= .", ifelse(p < .001, "< .001", sprintf("= %.3f", round(p, 3))))
+fmt_ci  <- function(lo, hi) paste0("[", fmt3(lo), ", ", fmt3(hi), "]")
+fmt_r2  <- function(x) sub("^0", "", sprintf("%.3f", round(x, 3)))
+fmt_pr2 <- function(x) fmt3(pmax(0, pmin(1, x)))
+
+# get_ixname() ─────────────────────────────────────────────────────────────────
+# Returns the coefficient name for the X:W interaction term in a fitted model.
+
+get_ixname <- function(fit, X, W) {
+  rn_clean <- gsub("`", "", names(coef(fit)), fixed = TRUE)
+  cand     <- c(paste0(X, ":", W), paste0(W, ":", X))
+  ix_clean <- intersect(cand, rn_clean)
+  if (!length(ix_clean))
+    stop(glue("Interaction {X}:{W} not found in model. Check variable names."))
+  names(coef(fit))[match(ix_clean[1], rn_clean)]
+}
+
+# run_one(): CTQ × moderator interaction model (HC3 SEs + BCa CI); returns one-row tibble.
+run_one <- function(y, w, data) {
+  needed       <- c(y, X, w, COV)
+  missing_cols <- setdiff(needed, names(data))
+  if (length(missing_cols))
+    stop(glue("run_one: missing columns for {y} x {w}: {paste(missing_cols, collapse = ', ')}"))
+
+  fml <- as.formula(glue(
+    "{bt(y)} ~ {bt(X)} * {bt(w)}{if (length(COV)) paste0(' + ', paste(bt(COV), collapse = ' + '))}"
+  ))
+
+  mf <- model.frame(fml, data = dat)
+
+  # Standardise outcome, X, and numeric covariates; mean-centre moderator
+  mfz      <- mf
+  mfz[[y]] <- as.numeric(scale(mfz[[y]]))
+  mfz[[X]] <- as.numeric(scale(mfz[[X]]))
+  for (cv in COV) if (is.numeric(mfz[[cv]])) mfz[[cv]] <- as.numeric(scale(mfz[[cv]]))
+  mw <- suppressWarnings(as.numeric(mfz[[w]]))
+  if (all(is.finite(mw))) mfz[[w]] <- mw - mean(mw, na.rm = TRUE)
+
+  fit <- lm(fml, data = mfz)
+  ix  <- get_ixname(fit, X, w)
+
+  # HC3 robust inference
+  V      <- sandwich::vcovHC(fit, type = "HC3")
+  est    <- unname(coef(fit)[ix])
+  se_hc3 <- sqrt(diag(V))[ix]
+  t_hc3  <- est / se_hc3
+  p_hc3  <- 2 * pt(-abs(t_hc3), df = df.residual(fit))
+  ci_hc3 <- lmtest::coefci(fit, vcov. = V)[ix, ]
+
+  # Partial R² from the HC3 Wald statistic (1 df)
+  pr2 <- as.numeric((t_hc3^2) / (t_hc3^2 + df.residual(fit)))
+
+  # BCa bootstrap CI for the interaction coefficient
+  stat_ix <- function(d, idx) {
+    f <- try(lm(fml, data = d[idx, , drop = FALSE]), silent = TRUE)
+    if (inherits(f, "try-error")) return(NA_real_)
+    cf <- try(coef(f)[ix], silent = TRUE)
+    if (inherits(cf, "try-error") || is.na(cf)) return(NA_real_)
+    as.numeric(cf)
+  }
+  bobj <- boot::boot(data = mfz, statistic = stat_ix, R = BOOT_R)
+
+  Boot_CI_95 <- tryCatch({
+    ci <- boot::boot.ci(bobj, type = "bca", index = 1)$bca[4:5]
+    fmt_ci(ci[1], ci[2])
+  }, error = function(e) tryCatch({
+    # Fall back to percentile CI if BCa fails (e.g. degenerate bootstrap distribution)
+    ci <- boot::boot.ci(bobj, type = "perc", index = 1)$percent[4:5]
+    fmt_ci(ci[1], ci[2])
+  }, error = function(e2) NA_character_))
+
+  tibble::tibble(
+    Tract          = y,
+    Moderator      = unname(mod_map[w]),
+    R2             = fmt_r2(summary(fit)$r.squared),
+    beta_std       = fmt3(est),
+    partial_R2_HC3 = fmt_pr2(pr2),
+    Robust_p       = apa_p(p_hc3),
+    Robust_CI_95   = fmt_ci(ci_hc3[1], ci_hc3[2]),
+    Boot_CI_95     = Boot_CI_95
+  )
+}
+
+safe_run_one <- purrr::safely(run_one, otherwise = NULL, quiet = TRUE)
+```
+
+# Statistical Analysis
+
+> *Methods:* Two supplementary analyses examined the robustness of the H1b moderation results. **(1) HC3 + bootstrap (Table S7):** Moderation models (PROCESS Model 1; Hayes, 2022) were re-estimated using heteroskedasticity-consistent (HC3) robust standard errors and BCa bootstrap 95% confidence intervals (5,000 resamples). An effect was considered robust when *both* criteria were simultaneously met. All models were estimated on standardised data (outcome and CTQ z-scored; moderators mean-centred). **(2) Three-way interaction (Table S8):** To directly address diagnostic comorbidity, a three-way CTQ × PTSD × mTBI interaction (PROCESS Model 3) was estimated for each tract. PTSD and mTBI status were coded as binary variables (0/1) derived from the four-group dummy variables. Tracts are those that showed significant CTQ–WM associations in H1a (FDR *p* < .05).
+
+- **Outcome (Y):** WM tract metric (MD or AD)
+- **Predictor (X):** CTQ total score
+- **Moderator(s) (W):** Diagnosis group dummy (PTSD-only, mTBI-only, Comorbid; reference: HC) for Table S7; binary PTSD presence × binary mTBI presence for Table S8
+- **Covariates:** Age, gender
+
+---
+
+# Analysis
+
+## Table S7: HC3 Robust Standard Errors and BCa Bootstrap CIs
+
+```{r run_s7, echo=FALSE}
+set.seed(123)
+
+# Run all tract × moderator combinations
+grid <- tidyr::crossing(Tract = available_tracts, Moderator_var = available_mods)
+
+res_list <- purrr::pmap(grid, function(Tract, Moderator_var) {
+  safe_run_one(Tract, Moderator_var, data = dat)
+})
+
+# Report any models that failed
+errs <- purrr::map_chr(res_list, \(x) if (is.null(x$error)) "" else x$error$message)
+if (any(nzchar(errs)))
+  message("Some models were skipped:\n",
+          paste(unique(head(errs[nzchar(errs)], 5)), collapse = "\n"))
+
+# Combine results and join pretty tract labels
+tab <- res_list |>
+  purrr::map("result") |>
+  purrr::compact() |>
+  dplyr::bind_rows()
+
+tab2 <- tab %>%
+  rename(Tract_raw = Tract) %>%
+  mutate(Moderator = factor(Moderator, levels = c("mTBI", "PTSD", "PTSD+mTBI"))) %>%
+  left_join(tract_map, by = "Tract_raw") %>%
+  filter(!is.na(Group)) %>%
+  mutate(Group = factor(Group, levels = c("MD", "AD"))) %>%
+  arrange(Group, Tract_order, Moderator)
+```
+
+---
+
+## Table S8: Three-way Interaction (PROCESS Model 3, Sensitivity Analysis)
+
+```{r run_s8, echo=FALSE}
+set.seed(123)
+
+# Build binary PTSD and mTBI status flags from the existing dummy columns.
+df_proc <- dat %>%
+  mutate(
+    ptsd_any = as.integer(`hc.ptsd.mtbi.groups.4groups_PTSD-only` == 1 |
+                          `hc.ptsd.mtbi.groups.4groups_Comorbid mTBI+PTSD` == 1),
+    mtbi_any = as.integer(`hc.ptsd.mtbi.groups.4groups_mTBI-only` == 1 |
+                          `hc.ptsd.mtbi.groups.4groups_Comorbid mTBI+PTSD` == 1),
+    ctq_c    = as.numeric(scale(ctq_totalscore)),   # z-scored (not just centred)
+    ptsd_c   = ptsd_any - mean(ptsd_any, na.rm = TRUE), # mean-centred
+    mtbi_c   = mtbi_any - mean(mtbi_any, na.rm = TRUE)  # mean-centred
+  )
+
+tracts_avail_proc <- intersect(tracts, names(df_proc))
+if (!length(tracts_avail_proc))
+  stop("run_s8: no requested tracts found in df_proc — check column names.")
+
+term3   <- "ctq_c:ptsd_c:mtbi_c"
+rows_m3 <- vector("list", length(tracts_avail_proc))
+
+# S8 uses the same APA-style helpers as S7 (no leading zeros).
+fmt_ci_s8 <- fmt_ci
+fmt_b_s8  <- fmt3
+
+for (i in seq_along(tracts_avail_proc)) {
+  y   <- tracts_avail_proc[i]
+  fml <- as.formula(paste0(bt(y), " ~ ctq_c * ptsd_c * mtbi_c + age + gender"))
+
+  mf       <- model.frame(fml, data = df_proc)
+  mf[[y]]  <- as.numeric(scale(mf[[y]]))   # z-score outcome per tract
+  fit <- lm(fml, data = mf)
+
+  if (!term3 %in% names(coef(fit)))
+    stop(glue("run_s8: three-way term '{term3}' not found for tract '{y}' — check variable names."))
+
+  # HC3 robust inference for the three-way term
+  V     <- sandwich::vcovHC(fit, type = "HC3")
+  b3    <- unname(coef(fit)[term3])
+  se3   <- sqrt(diag(V))[term3]
+  t3    <- b3 / se3
+  p_hc3 <- 2 * pt(-abs(t3), df = df.residual(fit))
+  ciH   <- lmtest::coefci(fit, vcov. = V)[term3, ]
+
+  # BCa bootstrap CI for the three-way term
+  stat3 <- function(data, idx) {
+    d  <- data[idx, , drop = FALSE]
+    cf <- try(coef(lm(fml, data = d))[term3], silent = TRUE)
+    if (inherits(cf, "try-error") || is.null(cf) || length(cf) != 1L) return(NA_real_)
+    as.numeric(cf)
+  }
+  bobj <- boot::boot(data = mf, statistic = stat3, R = BOOT_R)
+  ciB  <- tryCatch({
+    bca <- boot::boot.ci(bobj, type = "bca", index = 1)
+    c(bca$bca[4], bca$bca[5])
+  }, error = function(e) {
+    perc <- boot::boot.ci(bobj, type = "perc", index = 1)
+    c(perc$percent[4], perc$percent[5])
+  })
+
+  rows_m3[[i]] <- tibble::tibble(
+    Tract          = y,
+    R2             = fmt_r2(summary(fit)$r.squared),
+    beta           = fmt_b_s8(b3),
+    `p (HC3)`      = apa_p(p_hc3),
+    `95% CI (HC3)` = fmt_ci_s8(ciH[1], ciH[2]),
+    `95% CI (BCa)` = fmt_ci_s8(ciB[1], ciB[2])
+  )
+}
+
+Table_S4_M3 <- dplyr::bind_rows(rows_m3) %>%
+  rename(Tract_raw = Tract) %>%
+  left_join(tract_map, by = "Tract_raw") %>%
+  filter(!is.na(Group)) %>%
+  mutate(Group = factor(Group, levels = c("MD", "AD"))) %>%
+  arrange(Group, Tract_order) %>%
+  transmute(
+    Group, Tract = Tract_pretty, R2, beta, `p (HC3)`, `95% CI (HC3)`, `95% CI (BCa)`
+  )
+```
+
+---
+
+# Results
+
+## Table S7
+
+```{r display_s7, echo=FALSE}
+# Build display table: beta gets leading zero restored; p loses "= " prefix (APA S7 style)
+disp_s7 <- tab2 %>%
+  transmute(
+    Tract          = Tract_pretty,
+    Moderator,
+    beta           = sub("^\\.", "0.", sub("^-\\.", "-0.", beta_std)),
+    `p (HC3)`      = sub("^= ", "", Robust_p),
+    `95% CI (HC3)` = Robust_CI_95,
+    `95% CI (BCa)` = Boot_CI_95
+  )
+
+tbl_s7 <- disp_s7 |>
+  gt() |>
+  tab_header(
+    title = html(paste0(
+      "<b>Table S7.</b> Moderation Effects with HC3 Standard Errors and Bootstrap Confidence Intervals."
+    ))
+  ) |>
+  tab_style(
+    style     = cell_text(align = "left"),
+    locations = cells_title(groups = "title")
+  ) |>
+  cols_label(
+    beta           = html("\u03b2"),
+    `p (HC3)`      = html("<i>p</i> (HC3)"),
+    `95% CI (HC3)` = "95% CI (HC3)",
+    `95% CI (BCa)` = "95% CI (BCa)"
+  ) |>
+  cols_align(align = "left",   columns = Tract) |>
+  cols_align(align = "center", columns = -Tract) |>
+  tab_options(
+    table.font.size                   = "small",
+    source_notes.font.size            = "small",
+    data_row.padding                  = px(2),
+    heading.border.bottom.style       = "hidden",
+    table.border.top.style            = "solid",
+    table.border.bottom.style         = "solid",
+    column_labels.border.top.style    = "solid",
+    column_labels.border.bottom.style = "solid",
+    table_body.border.bottom.style    = "solid"
+  ) |>
+  tab_source_note(source_note = html(paste0(
+    "<i>Note.</i> MD, mean diffusivity; AD, axial diffusivity; AF, arcuate fasciculus; ",
+    "CB, cingulum bundle; CC, corpus callosum; ILF, inferior longitudinal fasciculus; ",
+    "IoFF, inferior occipito-frontal fasciculus; SLF, superior longitudinal fasciculus; ",
+    "UF, uncinate fasciculus; PTSD, post-traumatic stress disorder; mTBI, mild traumatic ",
+    "brain injury; HC3, heteroskedasticity-consistent; CI, confidence interval; BCa, ",
+    "bias-corrected accelerated. Models estimated on standardised data (outcomes and CTQ ",
+    "z-scored; moderators mean-centred). Reported: standardised interaction \u03b2, HC3 ",
+    "p-values and 95% CIs, BCa bootstrap 95% CIs (5,000 resamples)."
+  )))
+
+tbl_s7
+
+gtsave(tbl_s7,
+       here("output", "tables", "supplementary", "TableS7_Moderation_HC3.html"))
+```
+
+## Table S8
+
+```{r display_s8, echo=FALSE}
+tbl_s8 <- Table_S4_M3 |>
+  gt(groupname_col = "Group") |>
+  tab_header(
+    title = html(paste0(
+      "<b>Table S8.</b> Sensitivity analysis of three-way CM × PTSD × mTBI interactions on white matter
+microstructure."
+    ))
+  ) |>
+  tab_style(
+    style     = cell_text(align = "left"),
+    locations = cells_title(groups = "title")
+  ) |>
+  tab_style(
+    style     = cell_text(weight = "bold"),
+    locations = cells_row_groups()
+  ) |>
+  cols_label(
+    R2             = html("R\u00b2"),
+    beta           = html("\u03b2"),
+    `p (HC3)`      = html("<i>p</i> (HC3)"),
+    `95% CI (HC3)` = "95% CI (HC3)",
+    `95% CI (BCa)` = "95% CI (BCa)"
+  ) |>
+  cols_align(align = "left",   columns = Tract) |>
+  cols_align(align = "center", columns = -Tract) |>
+  tab_options(
+    table.font.size                   = "small",
+    source_notes.font.size            = "small",
+    data_row.padding                  = px(2),
+    heading.border.bottom.style       = "hidden",
+    table.border.top.style            = "solid",
+    table.border.bottom.style         = "solid",
+    column_labels.border.top.style    = "solid",
+    column_labels.border.bottom.style = "solid",
+    table_body.border.bottom.style    = "solid",
+    row_group.border.top.style        = "hidden",
+    row_group.border.bottom.style     = "hidden"
+  ) |>
+  tab_source_note(source_note = html(paste0(
+    "<i>Note.</i> MD, mean diffusivity; AD, axial diffusivity; AF, arcuate fasciculus; ",
+    "CB, cingulum bundle; CC, corpus callosum; ILF, inferior longitudinal fasciculus; ",
+    "IoFF, inferior occipito-frontal fasciculus; SLF, superior longitudinal fasciculus; ",
+    "UF, uncinate fasciculus; PTSD, post-traumatic stress disorder; mTBI, mild traumatic ",
+    "brain injury; HC3, heteroskedasticity-consistent; CI, confidence interval; BCa, ",
+    "bias-corrected accelerated. Linear models tested whether the CTQ\u2013WM association ",
+    "varied jointly by PTSD and mTBI status (CTQ \u00d7 PTSD \u00d7 mTBI), adjusting for ",
+    "age and sex. Entries are the three-way interaction coefficient (\u03b2), model R\u00b2, ",
+    "HC3 p-values with 95% CIs, and BCa bootstrap 95% CIs (5,000 resamples)."
+  )))
+
+tbl_s8
+
+gtsave(tbl_s8,
+       here("output", "tables", "supplementary", "TableS8_Moderation_3way.html"))
+```

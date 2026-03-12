@@ -1,0 +1,604 @@
+---
+title: "INTRuST CM — H2a Supplementary: White Matter Mediating CTQ → PTSD Symptoms"
+author: "Luisa Berger"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+
+suppressPackageStartupMessages({
+  library(here)
+  library(tidyverse)
+  library(gt)
+})
+
+set.seed(654321)
+
+dat <- readr::read_csv(
+  here("data", "analysis_simulated.csv"),
+  show_col_types = FALSE,
+  name_repair = "minimal"
+)
+
+dat$gender         <- as.numeric(dat$gender)
+dat$race           <- as.numeric(dat$race)
+dat$audit_10_score <- as.numeric(dat$audit_10_score)
+
+source(here("code", "utils", "process.R"), echo = FALSE)
+
+dir.create(here("output", "tables", "supplementary"), showWarnings = FALSE, recursive = TRUE)
+dir.create(here("output", "results", "supplementary"), showWarnings = FALSE, recursive = TRUE)
+```
+
+```{r define_mediators, include=FALSE}
+# Single source of truth for all mediators.
+# Names  = human-readable tract labels used in results tables.
+# Values = _1000 column names passed to PROCESS.
+
+md_mediators <- c(
+  "CC 6"        = "t_cc6.tensor1.meandiffusivity.mean_1000"
+)
+
+ad_mediators <- c(
+  "AF left"     = "t_af_left.tensor1.maxeigenvalue.mean_1000",
+  "CC 2"        = "t_cc2.tensor1.maxeigenvalue.mean_1000",
+  "CC 3"        = "t_cc3.tensor1.maxeigenvalue.mean_1000",
+  "CC 4"        = "t_cc4.tensor1.maxeigenvalue.mean_1000",
+  "CC 5"        = "t_cc5.tensor1.maxeigenvalue.mean_1000",
+  "CC 6"        = "t_cc6.tensor1.maxeigenvalue.mean_1000",
+  "SLF I left"  = "t_slf.i_left.tensor1.maxeigenvalue.mean_1000",
+  "SLF I right" = "t_slf.i_right.tensor1.maxeigenvalue.mean_1000",
+  "SLF II left" = "t_slf.ii_left.tensor1.maxeigenvalue.mean_1000",
+  "SLF II right"= "t_slf.ii_right.tensor1.maxeigenvalue.mean_1000"
+)
+
+all_mediators <- c(md_mediators, ad_mediators)
+
+# Positional metric labels (MD/AD) matching all_mediators order.
+# Stored as unnamed vector; run_model() accesses by index to avoid
+# duplicate-name lookup issues when a tract (e.g. CC 6) is significant
+# for both MD and AD.
+mediator_metric_vec <- c(rep("MD", length(md_mediators)), rep("AD", length(ad_mediators)))
+```
+
+```{r scale_wm_columns, include=FALSE}
+# WM diffusion values are on the order of 10^-6 (mm²/s). Rescale × 1,000,000
+# for numerical stability in PROCESS. Rescaled columns carry suffix "_1000".
+
+base_cols    <- sub("_1000$", "", all_mediators)
+missing_cols <- setdiff(base_cols, names(dat))
+
+if (length(missing_cols) > 0) {
+  stop("scale_wm_columns: the following expected columns are absent from the data:\n  ",
+       paste(missing_cols, collapse = "\n  "))
+}
+
+for (i in seq_along(all_mediators)) {
+  dat[[all_mediators[i]]] <- dat[[base_cols[i]]] * 1000000
+}
+```
+
+```{r helpers, include=FALSE}
+# parse_section() ─────────────────────────────────────────────────────────────
+parse_section <- function(out, keyword, min_vals = 4) {
+  effects_hdr <- which(grepl("direct",   out, ignore.case = TRUE) &
+                       grepl("indirect", out, ignore.case = TRUE))
+  search_from <- if (length(effects_hdr) > 0) tail(effects_hdr, 1L) else 1L
+
+  local_idx <- grep(keyword, out[search_from:length(out)], fixed = TRUE)
+  if (length(local_idx) == 0) {
+    local_idx <- grep(keyword, out, fixed = TRUE)
+    if (length(local_idx) == 0)
+      stop("parse_section: '", keyword, "' not found in PROCESS output.")
+    search_from <- 1L
+  }
+  abs_idx <- local_idx[1L] + search_from - 1L
+
+  for (i in seq(abs_idx + 1L, min(abs_idx + 20L, length(out)))) {
+    line  <- out[i]
+    if (is.na(line) || nchar(trimws(line)) == 0) next
+    nums  <- suppressWarnings(as.numeric(strsplit(trimws(line), "\\s+")[[1]]))
+    valid <- !is.na(nums)
+    if (sum(valid) >= min_vals) return(nums[valid])
+  }
+  context <- out[seq(abs_idx, min(abs_idx + 21L, length(out)))]
+  stop("parse_section: no data row found in '", keyword, "'.\nLines scanned:\n",
+       paste(context, collapse = "\n"))
+}
+
+# run_mediation() ─────────────────────────────────────────────────────────────
+# Unified function for all mediation models in this script.
+#   predictor  CTQ predictor column; defaults to total score (Models 1 & 2),
+#              set to a subscale column for Model 3.
+#   covars     Covariate columns; defaults to age + gender (Model 3 / main),
+#              pass covars_m1 or covars_m2 for robustness models.
+
+run_mediation <- function(dat, mediator,
+                          predictor = "ctq_totalscore",
+                          covars    = c("age", "gender")) {
+
+  if (!mediator  %in% names(dat)) stop("run_mediation: mediator '",  mediator,  "' not found.")
+  if (!predictor %in% names(dat)) stop("run_mediation: predictor '", predictor, "' not found.")
+
+  out <- capture.output(
+    process(
+      data    = dat,
+      y       = "pcl_total",
+      x       = predictor,
+      m       = mediator,
+      cov     = covars,
+      effsize = 1,
+      total   = 1,
+      stand   = 1,
+      boot    = 10000,
+      modelbt = 1,
+      seed    = 654321,
+      model   = 4
+    )
+  )
+
+  cat(out, sep = "\n")
+
+  total  <- parse_section(out, "Total effect of X on Y")
+  direct <- parse_section(out, "Direct effect of X on Y")
+
+  indir <- local({
+    indir_lines <- grep("Indirect effect", out, ignore.case = TRUE)
+    indir_lines <- indir_lines[!grepl("Completely standardized", out[indir_lines], ignore.case = TRUE)]
+    if (length(indir_lines) == 0)
+      stop("run_mediation: 'Indirect effect' section not found.")
+    for (sec_idx in rev(indir_lines)) {
+      window  <- out[seq(sec_idx + 1L, min(sec_idx + 5L, length(out)))]
+      if (!any(grepl("BootSE", window, fixed = TRUE))) next
+      hdr_rel <- grep("BootSE", window, fixed = TRUE)[1L]
+      start   <- sec_idx + hdr_rel + 1L
+      for (i in seq(start, min(start + 10L, length(out)))) {
+        line  <- out[i]
+        if (is.na(line) || nchar(trimws(line)) == 0) next
+        nums  <- suppressWarnings(as.numeric(strsplit(trimws(line), "\\s+")[[1]]))
+        vals  <- nums[!is.na(nums)]
+        if (length(vals) >= 4L) {
+          if (all(abs(vals) < 10)) return(vals)
+          break
+        }
+        break
+      }
+    }
+    stop("run_mediation: no plausible indirect-effects row found.")
+  })
+
+  invisible(tibble(
+    b_c      = total[7],  t_c      = total[3],  p_c      = total[4],
+    b_cprime = direct[7], t_cprime = direct[3], p_cprime = direct[4],
+    b_ab     = indir[1],  se_ab    = indir[2],  llci     = indir[3],
+    ulci     = indir[4]
+  ))
+}
+
+# run_model() ─────────────────────────────────────────────────────────────────
+# Loops run_mediation() over all tracts for a given covariate set,
+# printing labelled headers before each model output.
+
+run_model <- function(dat, covars, predictor = "ctq_totalscore") {
+  # Use positional indexing to handle duplicate tract names across MD/AD
+  metric_vec <- c(rep("MD", length(md_mediators)), rep("AD", length(ad_mediators)))
+  bind_rows(lapply(seq_along(all_mediators), function(i) {
+    tract_name   <- names(all_mediators)[i]
+    mediator_col <- all_mediators[[i]]
+    metric_name  <- metric_vec[i]
+    cat("--- ", metric_name, " \u2014 ", tract_name, " ---\n\n", sep = "")
+    run_mediation(dat, mediator_col,
+                  predictor = predictor, covars = covars) %>%
+      mutate(metric = metric_name, tract = tract_name)
+  })) %>%
+    mutate(metric_label = if_else(!duplicated(metric), metric, ""))
+}
+
+# make_table() ─────────────────────────────────────────────────────────────────
+# APA-style gt mediation table for Models 1 & 2 (full total/direct/indirect).
+
+make_table <- function(med_results, title_html, note_covars) {
+  med_results %>%
+    select(metric_label, tract,
+           b_c, t_c, p_c,
+           b_cprime, t_cprime, p_cprime,
+           b_ab, se_ab, llci, ulci) %>%
+    gt() %>%
+    tab_header(title = html(title_html)) %>%
+    tab_style(style = cell_text(align = "left"),
+              locations = cells_title(groups = "title")) %>%
+    tab_spanner(label = html("<b>Total effect</b> (<i>c</i>)"),
+                columns = c(b_c, t_c, p_c)) %>%
+    tab_spanner(label = html("<b>Direct effect</b> (<i>c</i>&#x2032;)"),
+                columns = c(b_cprime, t_cprime, p_cprime)) %>%
+    tab_spanner(label = "Percentile bootstrap\n95% confidence interval",
+                columns = c(llci, ulci), id = "ci_span") %>%
+    tab_spanner(label = html("<b>Indirect effect</b> (<i>ab</i>)"),
+                columns = c(b_ab, se_ab), spanners = "ci_span") %>%
+    cols_label(
+      metric_label = "", tract    = "",
+      b_c          = html("<i>b</i><sub>c</sub>"),
+      t_c          = html("<i>t</i>-value"), p_c      = html("<i>p</i>-value"),
+      b_cprime     = html("<i>b</i><sub>c&#x2032;</sub>"),
+      t_cprime     = html("<i>t</i>-value"), p_cprime = html("<i>p</i>-value"),
+      b_ab         = html("<i>b</i><sub>ab</sub>"),
+      se_ab        = "SE", llci = "Lower", ulci = "Upper"
+    ) %>%
+    fmt_number(columns = -c(metric_label, tract), decimals = 3) %>%
+    text_transform(
+      locations = cells_body(columns = c(p_c, p_cprime)),
+      fn = function(x) {
+        dplyr::case_when(x == "0.000" ~ "< .001", TRUE ~ sub("^0\\.", ".", x))
+      }
+    ) %>%
+    text_transform(
+      locations = cells_body(columns = -c(metric_label, tract, p_c, p_cprime)),
+      fn = function(x) {
+        x <- sub("^0\\.",       ".",       x)
+        x <- sub("^\u22120\\.", "\u2212.", x)
+        x
+      }
+    ) %>%
+    tab_style(style = cell_text(weight = "bold"),
+              locations = cells_body(columns = c(metric_label, tract))) %>%
+    tab_style(style = cell_text(weight = "bold"),
+              locations = cells_body(columns = c(p_c, p_cprime), rows = p_c < 0.05)) %>%
+    tab_style(style = cell_text(weight = "bold"),
+              locations = cells_body(columns = c(b_ab, se_ab, llci, ulci), rows = llci > 0)) %>%
+    cols_align(align = "left",   columns = c(metric_label, tract)) %>%
+    cols_align(align = "center", columns = -c(metric_label, tract)) %>%
+    tab_options(
+      table.font.size                   = "small",
+      source_notes.font.size            = "small",
+      data_row.padding                  = px(2),
+      heading.border.bottom.style       = "hidden",
+      table.border.top.style            = "solid",
+      table.border.bottom.style         = "solid",
+      column_labels.border.top.style    = "solid",
+      column_labels.border.bottom.style = "solid",
+      table_body.border.bottom.style    = "solid"
+    ) %>%
+    tab_source_note(
+      source_note = html(paste0(
+        "<i>Note.</i> MD, mean diffusivity; AD, axial diffusivity; CC, corpus callosum; ",
+        "SLF, superior longitudinal fasciculus; AF, arcuate fasciculus. ",
+        "The association between childhood maltreatment severity and PTSD symptom ",
+        "severity was partially mediated by mean diffusivity and axial diffusivity in ",
+        "various white matter tracts. All analyses were adjusted for ", note_covars, "."
+      ))
+    )
+}
+
+# add_stars() ─────────────────────────────────────────────────────────────────
+# Formats a coefficient to 3 dp (no leading zero) with APA significance stars.
+
+add_stars <- function(b, p) {
+  stars <- dplyr::case_when(
+    p <= 0.001 ~ "***", p <= 0.01 ~ "**", p <= 0.05 ~ "*", TRUE ~ ""
+  )
+  b_fmt <- sprintf("%.3f", b)
+  b_fmt <- sub("^0\\.",  ".",       b_fmt)
+  b_fmt <- sub("^-0\\.", "\u2212.", b_fmt)
+  paste0(b_fmt, stars)
+}
+```
+
+# Statistical Analysis
+
+> *Methods:* Two sets of supplementary mediation analyses are reported. **Post-hoc analyses** replicate the main H2a mediation with additional covariates (race; race and alcohol use) to assess robustness. **Additional analyses** examine each CTQ subscale separately as the independent variable. All other analytic decisions are identical to the main analysis: PROCESS macro Model 4, *N* = 10,000 bootstrap permutations, 95% percentile confidence intervals, seed = 654321.
+
+- **Outcome (Y):** PCL-5 total score
+- **Predictor (X):** CTQ total score (post-hoc analyses) or CTQ subscale (additional analyses)
+- **Mediator (M):** WM tract metric (MD or AD)
+
+---
+
+# Post-hoc Analyses: Additional Covariates
+
+> *Methods:* To assess robustness, the main H2a mediation models were rerun with race (post-hoc analysis 1) and race plus alcohol use (post-hoc analysis 2) added as covariates. All other analytic parameters were unchanged.
+
+## Post-hoc 1: Race as Additional Covariate
+
+- **Covariates:** Age, gender, race
+
+```{r covars_m1, include=FALSE}
+covars_m1 <- c("age", "gender", "race")
+```
+
+### Analysis
+
+```{r m1_analysis, echo=FALSE}
+med_results_m1 <- run_model(dat, covars = covars_m1)
+```
+
+### Results
+
+```{r results_table_m1, echo=FALSE}
+tbl_supp_m1 <- make_table(
+  med_results_m1,
+  title_html  = paste0(
+    "<b>Supplementary Table S2c.</b> Mediation results of childhood maltreatment ",
+    "severity on PTSD symptom severity, covarying for age, gender, and race ",
+    "(<i>N</i> = ", nrow(dat), ")."
+  ),
+  note_covars = "age, gender, and race"
+)
+
+tbl_supp_m1
+
+gtsave(tbl_supp_m1,
+       here("output", "tables", "supplementary", "TableS2c_Mediation_PCL_Race.html"))
+
+write.csv(
+  med_results_m1 %>% select(-metric_label),
+  here("output", "results", "supplementary", "Mediation_WM_PCL_Race_results.csv"),
+  row.names = FALSE
+)
+```
+
+---
+
+## Post-hoc 2: Race and Alcohol Use as Additional Covariates
+
+- **Covariates:** Age, gender, race, alcohol use (AUDIT-10)
+
+```{r covars_m2, include=FALSE}
+covars_m2 <- c("age", "gender", "race", "audit_10_score")
+```
+
+### Analysis
+
+```{r m2_analysis, echo=FALSE}
+med_results_m2 <- run_model(dat, covars = covars_m2)
+```
+
+### Results
+
+```{r results_table_m2, echo=FALSE}
+tbl_supp_m2 <- make_table(
+  med_results_m2,
+  title_html  = paste0(
+    "<b>Supplementary Table S2d.</b> Mediation results of childhood maltreatment ",
+    "severity on PTSD symptom severity, covarying for age, gender, race, and alcohol use ",
+    "(<i>N</i> = ", nrow(dat), ")."
+  ),
+  note_covars = "age, gender, race, and alcohol use (AUDIT-10)"
+)
+
+
+tbl_supp_m2
+
+gtsave(tbl_supp_m2,
+       here("output", "tables", "supplementary", "TableS2d_Mediation_PCL_RaceAlcohol.html"))
+
+write.csv(
+  med_results_m2 %>% select(-metric_label),
+  here("output", "results", "supplementary", "Mediation_WM_PCL_RaceAlcohol_results.csv"),
+  row.names = FALSE
+)
+```
+
+---
+
+# Additional Analyses: CTQ Subscales
+
+> *Methods:* To further examine the role of specific maltreatment types, the main H2a mediation models were rerun substituting the CTQ total score with each of the five CTQ subscales as the independent variable: emotional neglect, physical neglect, emotional abuse, physical abuse, and sexual abuse. The mediators, outcome, and covariates (age, gender) were otherwise unchanged.
+
+- **Predictor (X):** CTQ subscale score (one model per subscale)  |  **Covariates:** Age, gender
+
+> **Note:** This section runs 55 PROCESS models (5 subscales × 11 mediators × 10,000 bootstraps). Runtime may be substantial (~15–20 minutes).
+
+```{r define_subscales, include=FALSE}
+# Names  = column prefix used in the wide results table (en/pn/ea/pa/sa)
+# Values = dataset column names
+# Labels = human-readable names for spanners and the note
+
+subscale_abbr <- c(
+  en = "ctq_emoneg_score",
+  pn = "ctq_physneg_score",
+  ea = "ctq_emo_score",
+  pa = "ctq_phys_score",
+  sa = "ctq_sex_score"
+)
+
+subscale_labels <- c(
+  en = "Emotional neglect",
+  pn = "Physical neglect",
+  ea = "Emotional abuse",
+  pa = "Physical abuse",
+  sa = "Sexual abuse"
+)
+```
+
+## Analysis
+
+```{r run_subscale_mediations, echo=FALSE}
+# Loop over all subscale × mediator combinations (55 models total).
+# PROCESS output is printed inline per model for transparency.
+
+subscale_results <- bind_rows(lapply(names(subscale_abbr), function(sub) {
+
+  cat(rep("=", 60), sep = "")
+  cat("\nSubscale:", subscale_labels[[sub]], "\n")
+  cat(rep("=", 60), sep = "")
+  cat("\n\n")
+
+  run_model(dat, covars = c("age", "gender"),
+            predictor = subscale_abbr[[sub]]) %>%
+    mutate(sub_abbr = sub)
+}))
+```
+
+## Results
+
+```{r results_table_subscales, echo=FALSE}
+# ── Total effects: one per subscale (identical across mediators) ──────────────
+note_total <- subscale_results %>%
+  group_by(sub_abbr) %>%
+  slice(1) %>%
+  ungroup() %>%
+  mutate(
+    label = subscale_labels[sub_abbr],
+    b_fmt = sub("^0\\.", ".", sprintf("%.3f", b_c)),
+    entry = paste0(
+      "<i>b</i><sub>c, ", label, "</sub> = ", b_fmt,
+      ", <i>t</i>(", nrow(dat) - 1, ") = ", sprintf("%.3f", t_c),
+      ", <i>p</i> &lt; .001"
+    )
+  ) %>%
+  pull(entry) %>%
+  paste(collapse = "; ")
+
+# ── Pivot wide: one row per tract, one set of columns per subscale ────────────
+results_wide <- subscale_results %>%
+  mutate(bcprime_str = add_stars(b_cprime, p_cprime)) %>%
+  select(sub_abbr, metric, tract, bcprime_str, b_ab, llci, ulci) %>%
+  pivot_wider(
+    names_from  = sub_abbr,
+    values_from = c(bcprime_str, b_ab, llci, ulci),
+    names_glue  = "{sub_abbr}_{.value}"
+  ) %>%
+  mutate(
+    metric      = factor(metric, levels = c("MD", "AD")),
+    tract_order = case_when(
+      metric == "MD" ~ match(tract, names(md_mediators)),
+      metric == "AD" ~ match(tract, names(ad_mediators))
+    )
+  ) %>%
+  arrange(metric, tract_order) %>%
+  mutate(
+    tract        = as.character(tract),
+    metric       = as.character(metric),
+    metric_label = if_else(!duplicated(metric), metric, "")
+  ) %>%
+  select(-tract_order)
+
+# ── gt table ──────────────────────────────────────────────────────────────────
+tbl_subscales <- results_wide %>%
+  select(metric_label, tract,
+         en_bcprime_str, en_b_ab, en_llci, en_ulci,
+         pn_bcprime_str, pn_b_ab, pn_llci, pn_ulci,
+         ea_bcprime_str, ea_b_ab, ea_llci, ea_ulci,
+         pa_bcprime_str, pa_b_ab, pa_llci, pa_ulci,
+         sa_bcprime_str, sa_b_ab, sa_llci, sa_ulci) %>%
+  gt() %>%
+  tab_header(
+    title = html(paste0(
+      "<b>Table S13.</b> Mediation results of childhood maltreatment types on ",
+      "PTSD symptom severity (<i>N</i> = ", nrow(dat), ")."
+    ))
+  ) %>%
+  tab_style(style = cell_text(align = "left"),
+            locations = cells_title(groups = "title")) %>%
+
+  # Innermost: bootstrap CI spanners per subscale
+  tab_spanner(id = "en_ci", label = "Perc. Bootstrap\n95% CI", columns = c(en_llci, en_ulci)) %>%
+  tab_spanner(id = "pn_ci", label = "Perc. Bootstrap\n95% CI", columns = c(pn_llci, pn_ulci)) %>%
+  tab_spanner(id = "ea_ci", label = "Perc. Bootstrap\n95% CI", columns = c(ea_llci, ea_ulci)) %>%
+  tab_spanner(id = "pa_ci", label = "Perc. Bootstrap\n95% CI", columns = c(pa_llci, pa_ulci)) %>%
+  tab_spanner(id = "sa_ci", label = "Perc. Bootstrap\n95% CI", columns = c(sa_llci, sa_ulci)) %>%
+
+  # Mid-level: direct and indirect effect per subscale
+  tab_spanner(id = "en_dir", label = "Direct effect",   columns = en_bcprime_str) %>%
+  tab_spanner(id = "en_ind", label = "Indirect effect", columns = en_b_ab, spanners = "en_ci") %>%
+  tab_spanner(id = "pn_dir", label = "Direct effect",   columns = pn_bcprime_str) %>%
+  tab_spanner(id = "pn_ind", label = "Indirect effect", columns = pn_b_ab, spanners = "pn_ci") %>%
+  tab_spanner(id = "ea_dir", label = "Direct effect",   columns = ea_bcprime_str) %>%
+  tab_spanner(id = "ea_ind", label = "Indirect effect", columns = ea_b_ab, spanners = "ea_ci") %>%
+  tab_spanner(id = "pa_dir", label = "Direct effect",   columns = pa_bcprime_str) %>%
+  tab_spanner(id = "pa_ind", label = "Indirect effect", columns = pa_b_ab, spanners = "pa_ci") %>%
+  tab_spanner(id = "sa_dir", label = "Direct effect",   columns = sa_bcprime_str) %>%
+  tab_spanner(id = "sa_ind", label = "Indirect effect", columns = sa_b_ab, spanners = "sa_ci") %>%
+
+  # Outer: subscale labels
+  tab_spanner(id = "en_out", label = "Emotional neglect", spanners = c("en_dir", "en_ind")) %>%
+  tab_spanner(id = "pn_out", label = "Physical neglect",  spanners = c("pn_dir", "pn_ind")) %>%
+  tab_spanner(id = "ea_out", label = "Emotional abuse",   spanners = c("ea_dir", "ea_ind")) %>%
+  tab_spanner(id = "pa_out", label = "Physical abuse",    spanners = c("pa_dir", "pa_ind")) %>%
+  tab_spanner(id = "sa_out", label = "Sexual abuse",      spanners = c("sa_dir", "sa_ind")) %>%
+
+  cols_label(
+    metric_label = "", tract = "",
+    en_bcprime_str = html("<i>b</i><sub>c&#x2032;</sub>"),
+    en_b_ab = html("<i>b</i><sub>ab</sub>"), en_llci = "Lower", en_ulci = "Upper",
+    pn_bcprime_str = html("<i>b</i><sub>c&#x2032;</sub>"),
+    pn_b_ab = html("<i>b</i><sub>ab</sub>"), pn_llci = "Lower", pn_ulci = "Upper",
+    ea_bcprime_str = html("<i>b</i><sub>c&#x2032;</sub>"),
+    ea_b_ab = html("<i>b</i><sub>ab</sub>"), ea_llci = "Lower", ea_ulci = "Upper",
+    pa_bcprime_str = html("<i>b</i><sub>c&#x2032;</sub>"),
+    pa_b_ab = html("<i>b</i><sub>ab</sub>"), pa_llci = "Lower", pa_ulci = "Upper",
+    sa_bcprime_str = html("<i>b</i><sub>c&#x2032;</sub>"),
+    sa_b_ab = html("<i>b</i><sub>ab</sub>"), sa_llci = "Lower", sa_ulci = "Upper"
+  ) %>%
+
+  # bcprime_str columns are pre-formatted character; apply fmt_number only to numerics
+  fmt_number(columns = c(ends_with("_b_ab"), ends_with("_llci"), ends_with("_ulci")),
+             decimals = 3) %>%
+  text_transform(
+    locations = cells_body(columns = c(ends_with("_b_ab"), ends_with("_llci"), ends_with("_ulci"))),
+    fn = function(x) {
+      x <- sub("^0\\.",       ".",       x)
+      x <- sub("^\u22120\\.", "\u2212.", x)
+      x
+    }
+  ) %>%
+
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_body(columns = c(metric_label, tract))) %>%
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_body(columns = c(en_b_ab, en_llci, en_ulci), rows = en_llci > 0)) %>%
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_body(columns = c(pn_b_ab, pn_llci, pn_ulci), rows = pn_llci > 0)) %>%
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_body(columns = c(ea_b_ab, ea_llci, ea_ulci), rows = ea_llci > 0)) %>%
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_body(columns = c(pa_b_ab, pa_llci, pa_ulci), rows = pa_llci > 0)) %>%
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_body(columns = c(sa_b_ab, sa_llci, sa_ulci), rows = sa_llci > 0)) %>%
+
+  cols_align(align = "left",   columns = c(metric_label, tract)) %>%
+  cols_align(align = "center", columns = -c(metric_label, tract)) %>%
+  tab_options(
+    table.font.size                   = "small",
+    source_notes.font.size            = "small",
+    data_row.padding                  = px(2),
+    heading.border.bottom.style       = "hidden",
+    table.border.top.style            = "solid",
+    table.border.bottom.style         = "solid",
+    column_labels.border.top.style    = "solid",
+    column_labels.border.bottom.style = "solid",
+    table_body.border.bottom.style    = "solid"
+  ) %>%
+  tab_source_note(
+    source_note = html(paste0(
+      "<i>Note.</i> Total effects: ", note_total, ". ",
+      "Additional mediation analyses using childhood maltreatment types as independent ",
+      "variables highlighted the substantial contributions of emotional neglect and ",
+      "emotional abuse to the observed effects. ",
+      "All analyses were corrected for age and gender. ",
+      "MD, mean diffusivity; AD, axial diffusivity; CC, corpus callosum; ",
+      "AF, arcuate fasciculus; SLF, superior longitudinal fasciculus. ",
+      "***<i>p</i> &le; .001."
+    ))
+  )
+
+tbl_subscales
+
+gtsave(tbl_subscales,
+       here("output", "tables", "supplementary",
+            "TableS13_Mediation_PCL_Subscales.html"))
+
+write.csv(
+  subscale_results %>% select(sub_abbr, metric, tract, b_c, t_c, p_c,
+                              b_cprime, p_cprime, b_ab, llci, ulci),
+  here("output", "results", "supplementary",
+       "Mediation_WM_PCL_Subscales_results.csv"),
+  row.names = FALSE
+)
+```

@@ -1,0 +1,390 @@
+---
+title: "INTRuST CM — H1b: Moderation of CTQ–WM Associations by Diagnosis"
+author: "Luisa Berger"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+
+suppressPackageStartupMessages({
+  library(here)
+  library(tidyverse)
+  library(fastDummies)
+  library(broom)
+  library(gt)
+})
+
+set.seed(1234)
+
+dat <- readr::read_csv(
+  here("data", "analysis_simulated.csv"),
+  show_col_types = FALSE,
+  name_repair = "minimal"
+)
+
+dat$gender     <- as.numeric(dat$gender)
+dat$tbi.diagnosis  <- as.numeric(dat$tbi.diagnosis)
+dat$ptsd.diagnosis <- as.numeric(dat$ptsd.diagnosis)
+dat$race       <- as.numeric(dat$race)
+
+source(here("code", "utils", "process.R"), echo = FALSE)
+```
+
+```{r dummy_variables, include=FALSE}
+# Create dummy variables for the 4-group diagnosis variable
+dat <- dummy_cols(dat, select_columns = "hc.ptsd.mtbi.groups.4groups")
+dat$hc.ptsd.mtbi.groups.4groups <- as.numeric(dat$hc.ptsd.mtbi.groups.4groups)
+
+# Named vector: readable label -> column name used as moderator in process()
+moderators <- c(
+  "mTBI-only" = "hc.ptsd.mtbi.groups.4groups_mTBI-only",
+  "PTSD-only"  = "hc.ptsd.mtbi.groups.4groups_PTSD-only",
+  "Comorbid"   = "hc.ptsd.mtbi.groups.4groups_Comorbid mTBI+PTSD"
+)
+```
+
+# Statistical Analysis
+
+> *Methods:* PROCESS macro (Model 1; Hayes, 2022) tested whether diagnosis group moderated the association between CM severity and WM microstructure. Diagnoses were dummy-coded (reference group: HC = 0). Age and gender included as covariates. Analyses were conducted for all WM tracts showing significant CTQ associations in H1a (FDR *p* < .05).
+
+- **Outcome (Y):** WM tract metric (MD or AD)
+- **Predictor (X):** CTQ total score
+- **Moderator (W):** Diagnosis group dummy (mTBI-only, PTSD-only, Comorbid; reference: HC)
+- **Covariates:** Age, gender
+
+# Analysis
+
+## MD tracts
+
+### MD — AF right
+```{r MD_AF_right, echo=FALSE}
+walk(moderators, ~ process(data = dat,
+                            y   = "t_af_right.tensor1.meandiffusivity.mean",
+                            x   = "ctq_totalscore", w = .x,
+                            cov = c("age", "gender"), model = 1))
+```
+
+### MD — ILF right
+```{r MD_ILF_right, echo=FALSE}
+walk(moderators, ~ process(data = dat,
+                            y   = "t_ilf_right.tensor1.meandiffusivity.mean",
+                            x   = "ctq_totalscore", w = .x,
+                            cov = c("age", "gender"), model = 1))
+```
+
+### MD — IoFF left
+```{r MD_IoFF_left, echo=FALSE}
+walk(moderators, ~ process(data = dat,
+                            y   = "t_ioff_left.tensor1.meandiffusivity.mean",
+                            x   = "ctq_totalscore", w = .x,
+                            cov = c("age", "gender"), model = 1))
+```
+
+### MD — IoFF right
+```{r MD_IoFF_right, echo=FALSE}
+walk(moderators, ~ process(data = dat,
+                            y   = "t_ioff_right.tensor1.meandiffusivity.mean",
+                            x   = "ctq_totalscore", w = .x,
+                            cov = c("age", "gender"), model = 1))
+```
+
+### MD — UF right
+```{r MD_UF_right, echo=FALSE}
+walk(moderators, ~ process(data = dat,
+                            y   = "t_uf_right.tensor1.meandiffusivity.mean",
+                            x   = "ctq_totalscore", w = .x,
+                            cov = c("age", "gender"), model = 1))
+```
+
+### MD — CC 1
+```{r MD_CC1, echo=FALSE}
+walk(moderators, ~ process(data = dat,
+                            y   = "t_cc1.tensor1.meandiffusivity.mean",
+                            x   = "ctq_totalscore", w = .x,
+                            cov = c("age", "gender"), model = 1))
+```
+
+### MD — CC 2
+```{r MD_CC2, echo=FALSE}
+walk(moderators, ~ process(data = dat,
+                            y   = "t_cc2.tensor1.meandiffusivity.mean",
+                            x   = "ctq_totalscore", w = .x,
+                            cov = c("age", "gender"), model = 1))
+```
+
+### MD — CC 6
+```{r MD_CC6, echo=FALSE}
+walk(moderators, ~ process(data = dat,
+                            y   = "t_cc6.tensor1.meandiffusivity.mean",
+                            x   = "ctq_totalscore", w = .x,
+                            cov = c("age", "gender"), model = 1))
+```
+
+## AD tracts
+
+### AD — AF left
+```{r AD_AF_left, echo=FALSE}
+walk(moderators, ~ process(data = dat,
+                            y   = "t_af_left.tensor1.maxeigenvalue.mean",
+                            x   = "ctq_totalscore", w = .x,
+                            cov = c("age", "gender"), model = 1))
+```
+
+### AD — AF right
+```{r AD_AF_right, echo=FALSE}
+walk(moderators, ~ process(data = dat,
+                            y   = "t_af_right.tensor1.maxeigenvalue.mean",
+                            x   = "ctq_totalscore", w = .x,
+                            cov = c("age", "gender"), model = 1))
+```
+
+### AD — CB right
+```{r AD_CB_right, echo=FALSE}
+walk(moderators, ~ process(data = dat,
+                            y   = "t_cb_right.tensor1.maxeigenvalue.mean",
+                            x   = "ctq_totalscore", w = .x,
+                            cov = c("age", "gender"), model = 1))
+```
+
+### AD — IoFF left
+```{r AD_IoFF_left, echo=FALSE}
+walk(moderators, ~ process(data = dat,
+                            y   = "t_ioff_left.tensor1.maxeigenvalue.mean",
+                            x   = "ctq_totalscore", w = .x,
+                            cov = c("age", "gender"), model = 1))
+```
+
+### AD — SLF I left
+```{r AD_SLF_I_left, echo=FALSE}
+walk(moderators, ~ process(data = dat,
+                            y   = "t_slf.i_left.tensor1.maxeigenvalue.mean",
+                            x   = "ctq_totalscore", w = .x,
+                            cov = c("age", "gender"), model = 1))
+```
+
+### AD — SLF I right
+```{r AD_SLF_I_right, echo=FALSE}
+walk(moderators, ~ process(data = dat,
+                            y   = "t_slf.i_right.tensor1.maxeigenvalue.mean",
+                            x   = "ctq_totalscore", w = .x,
+                            cov = c("age", "gender"), model = 1))
+```
+
+### AD — SLF II left
+```{r AD_SLF_II_left, echo=FALSE}
+walk(moderators, ~ process(data = dat,
+                            y   = "t_slf.ii_left.tensor1.maxeigenvalue.mean",
+                            x   = "ctq_totalscore", w = .x,
+                            cov = c("age", "gender"), model = 1))
+```
+
+### AD — SLF II right
+```{r AD_SLF_II_right, echo=FALSE}
+walk(moderators, ~ process(data = dat,
+                            y   = "t_slf.ii_right.tensor1.maxeigenvalue.mean",
+                            x   = "ctq_totalscore", w = .x,
+                            cov = c("age", "gender"), model = 1))
+```
+
+### AD — SLF III right
+```{r AD_SLF_III_right, echo=FALSE}
+walk(moderators, ~ process(data = dat,
+                            y   = "t_slf.iii_right.tensor1.maxeigenvalue.mean",
+                            x   = "ctq_totalscore", w = .x,
+                            cov = c("age", "gender"), model = 1))
+```
+
+### AD — CC 2
+```{r AD_CC2, echo=FALSE}
+walk(moderators, ~ process(data = dat,
+                            y   = "t_cc2.tensor1.maxeigenvalue.mean",
+                            x   = "ctq_totalscore", w = .x,
+                            cov = c("age", "gender"), model = 1))
+```
+
+### AD — CC 3
+```{r AD_CC3, echo=FALSE}
+walk(moderators, ~ process(data = dat,
+                            y   = "t_cc3.tensor1.maxeigenvalue.mean",
+                            x   = "ctq_totalscore", w = .x,
+                            cov = c("age", "gender"), model = 1))
+```
+
+### AD — CC 4
+```{r AD_CC4, echo=FALSE}
+walk(moderators, ~ process(data = dat,
+                            y   = "t_cc4.tensor1.maxeigenvalue.mean",
+                            x   = "ctq_totalscore", w = .x,
+                            cov = c("age", "gender"), model = 1))
+```
+
+### AD — CC 5
+```{r AD_CC5, echo=FALSE}
+walk(moderators, ~ process(data = dat,
+                            y   = "t_cc5.tensor1.maxeigenvalue.mean",
+                            x   = "ctq_totalscore", w = .x,
+                            cov = c("age", "gender"), model = 1))
+```
+
+### AD — CC 6
+```{r AD_CC6, echo=FALSE}
+walk(moderators, ~ process(data = dat,
+                            y   = "t_cc6.tensor1.maxeigenvalue.mean",
+                            x   = "ctq_totalscore", w = .x,
+                            cov = c("age", "gender"), model = 1))
+```
+
+# Results
+
+```{r moderation_helper, include=FALSE}
+# fit_mod(): Fit CTQ × moderator interaction for one tract.
+# Results match process() Model 1 output exactly (no bootstrapping).
+fit_mod <- function(dat, y_col, moderator,
+                    predictor = "ctq_totalscore",
+                    covars    = c("age", "gender")) {
+
+  fm <- as.formula(
+    sprintf("%s ~ %s * `%s` + %s", y_col, predictor, moderator,
+            paste(covars, collapse = " + "))
+  )
+
+  # Unstandardised: p-value for interaction term
+  p_val <- lm(fm, data = dat) %>%
+    broom::tidy() %>%
+    filter(str_detect(term, paste0(predictor, ":"))) %>%
+    pull(p.value)
+
+  # Standardised: z-score outcome and continuous predictors
+  dat_sc <- dat %>%
+    mutate(across(all_of(c(y_col, predictor, "age")), ~ as.numeric(scale(.x))))
+
+  beta <- lm(fm, data = dat_sc) %>%
+    broom::tidy() %>%
+    filter(str_detect(term, paste0(predictor, ":"))) %>%
+    pull(estimate)
+
+  tibble(p = p_val, beta = beta)
+}
+
+# run_mod_grid(): Run fit_mod() for all tracts × all moderators.
+# Returns a wide tibble: one row per tract, columns for each moderator's p and β.
+run_mod_grid <- function(tracts) {
+  imap_dfr(tracts, function(y_col, tract_name) {
+    res <- map(moderators, ~ fit_mod(dat, y_col, .x))
+    tibble(
+      tract         = tract_name,
+      mTBI_p        = res[["mTBI-only"]]$p,
+      mTBI_beta     = res[["mTBI-only"]]$beta,
+      PTSD_p        = res[["PTSD-only"]]$p,
+      PTSD_beta     = res[["PTSD-only"]]$beta,
+      Comorbid_p    = res[["Comorbid"]]$p,
+      Comorbid_beta = res[["Comorbid"]]$beta
+    )
+  })
+}
+
+md_tracts <- c(
+  "AF right"  = "t_af_right.tensor1.meandiffusivity.mean",
+  "ILF right" = "t_ilf_right.tensor1.meandiffusivity.mean",
+  "IoFF left" = "t_ioff_left.tensor1.meandiffusivity.mean",
+  "IoFF right"= "t_ioff_right.tensor1.meandiffusivity.mean",
+  "UF right"  = "t_uf_right.tensor1.meandiffusivity.mean",
+  "CC 1"      = "t_cc1.tensor1.meandiffusivity.mean",
+  "CC 2"      = "t_cc2.tensor1.meandiffusivity.mean",
+  "CC 6"      = "t_cc6.tensor1.meandiffusivity.mean"
+)
+
+ad_tracts <- c(
+  "AF left"       = "t_af_left.tensor1.maxeigenvalue.mean",
+  "AF right"      = "t_af_right.tensor1.maxeigenvalue.mean",
+  "CB right"      = "t_cb_right.tensor1.maxeigenvalue.mean",
+  "IoFF left"     = "t_ioff_left.tensor1.maxeigenvalue.mean",
+  "SLF I left"    = "t_slf.i_left.tensor1.maxeigenvalue.mean",
+  "SLF I right"   = "t_slf.i_right.tensor1.maxeigenvalue.mean",
+  "SLF II left"   = "t_slf.ii_left.tensor1.maxeigenvalue.mean",
+  "SLF II right"  = "t_slf.ii_right.tensor1.maxeigenvalue.mean",
+  "SLF III right" = "t_slf.iii_right.tensor1.maxeigenvalue.mean",
+  "CC 2"          = "t_cc2.tensor1.maxeigenvalue.mean",
+  "CC 3"          = "t_cc3.tensor1.maxeigenvalue.mean",
+  "CC 4"          = "t_cc4.tensor1.maxeigenvalue.mean",
+  "CC 5"          = "t_cc5.tensor1.maxeigenvalue.mean",
+  "CC 6"          = "t_cc6.tensor1.maxeigenvalue.mean"
+)
+```
+
+```{r moderation_table, echo=FALSE}
+results_mod <- bind_rows(
+  run_mod_grid(md_tracts) %>% mutate(metric = "Mean diffusivity (MD)"),
+  run_mod_grid(ad_tracts) %>% mutate(metric = "Axial diffusivity (AD)")
+)
+
+tbl_mod <- results_mod %>%
+  select(tract, mTBI_p, mTBI_beta, PTSD_p, PTSD_beta, Comorbid_p, Comorbid_beta) %>%
+  gt(groupname_col = NULL) %>%
+  tab_header(
+    title = html(paste0("<b>Table 3.</b> Moderation of CTQ–white matter associations by diagnosis group (<i>N</i> = ", nrow(dat), ")."))
+  ) %>%
+  tab_style(style = cell_text(align = "left"), locations = cells_title(groups = "title")) %>%
+  tab_row_group(label = "Axial diffusivity (AD)",  rows = results_mod$metric == "Axial diffusivity (AD)") %>%
+  tab_row_group(label = "Mean diffusivity (MD)",   rows = results_mod$metric == "Mean diffusivity (MD)") %>%
+  tab_spanner(label = md("**mTBI-only**"),  columns = c(mTBI_p, mTBI_beta)) %>%
+  tab_spanner(label = md("**PTSD-only**"),  columns = c(PTSD_p, PTSD_beta)) %>%
+  tab_spanner(label = md("**Comorbid**"),   columns = c(Comorbid_p, Comorbid_beta)) %>%
+  cols_label(
+    tract        = "",
+    mTBI_p       = html("<i>p</i>"), mTBI_beta    = md("**beta**"),
+    PTSD_p       = html("<i>p</i>"), PTSD_beta    = md("**beta**"),
+    Comorbid_p   = html("<i>p</i>"), Comorbid_beta= md("**beta**")
+  ) %>%
+  fmt_number(columns = -tract, decimals = 3) %>%
+  text_transform(
+    locations = cells_body(columns = -tract),
+    fn = function(x) {
+      x <- sub("^0\\.",       ".",       x)
+      x <- sub("^\u22120\\.", "\u2212.", x)
+      x
+    }
+  ) %>%
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_body(columns = c(mTBI_p, mTBI_beta),     rows = mTBI_p     < 0.05)) %>%
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_body(columns = c(PTSD_p, PTSD_beta),     rows = PTSD_p     < 0.05)) %>%
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_body(columns = c(Comorbid_p, Comorbid_beta), rows = Comorbid_p < 0.05)) %>%
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_body(columns = tract)) %>%
+  cols_align(align = "left",   columns = tract) %>%
+  cols_align(align = "center", columns = -tract) %>%
+  tab_options(
+    table.font.size                   = "small",
+    source_notes.font.size            = "small",
+    data_row.padding                  = px(2),
+    heading.border.bottom.style       = "hidden",
+    table.border.top.style            = "solid",
+    table.border.bottom.style         = "solid",
+    column_labels.border.top.style    = "solid",
+    column_labels.border.bottom.style = "solid",
+    table_body.border.bottom.style    = "solid",
+    row_group.font.weight             = "bold"
+  ) %>%
+  tab_source_note(
+    source_note = html(
+      "Interaction β (standardised) and p-value for the CTQ × diagnosis term from linear regression (Model 1, Hayes PROCESS). Diagnosis groups are dummy-coded with healthy controls (HC) as the reference group (= 0). No significant moderation effects were found.<br><i>Note.</i> CTQ, Childhood Trauma Questionnaire; MD, mean diffusivity; AD, axial diffusivity; HC, healthy controls; mTBI, mild traumatic brain injury; PTSD, post-traumatic stress disorder."
+    )
+  )
+
+tbl_mod
+
+gtsave(tbl_mod,
+       here("output", "tables", "main", "Table3_Moderation.html"))
+
+write.csv(results_mod,
+          here("output", "results", "main", "Moderation_results.csv"),
+          row.names = FALSE)
+```

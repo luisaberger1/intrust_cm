@@ -1,0 +1,212 @@
+---
+title: "INTRuST CM — H1a: CTQ and White Matter Microstructure"
+author: "Luisa Berger"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+
+suppressPackageStartupMessages({
+  library(here)
+  library(tidyverse)
+  library(broom)
+  library(gt)
+})
+
+set.seed(1234)
+
+dat <- readr::read_csv(
+  here("data", "analysis_simulated.csv"),
+  show_col_types = FALSE,
+  name_repair = "minimal"
+)
+
+dat <- dat %>%
+  mutate(
+    ctq_totalscore = as.numeric(ctq_totalscore),
+    age = as.numeric(age),
+    gender = factor(gender)
+  )
+```
+
+```{r helper_functions, include=FALSE}
+# Tract label lookup: maps column-name prefixes to readable tract names.
+tract_labels <- c(
+  t_af_left      = "AF left",      t_af_right      = "AF right",
+  t_cb_left      = "CB left",      t_cb_right      = "CB right",
+  t_cc1          = "CC 1",         t_cc2           = "CC 2",
+  t_cc3          = "CC 3",         t_cc4           = "CC 4",
+  t_cc5          = "CC 5",         t_cc6           = "CC 6",
+  t_cc7          = "CC 7",
+  t_ilf_left     = "ILF left",     t_ilf_right     = "ILF right",
+  t_ioff_left    = "IoFF left",    t_ioff_right    = "IoFF right",
+  t_slf.i_left   = "SLF I left",   t_slf.i_right   = "SLF I right",
+  t_slf.ii_left  = "SLF II left",  t_slf.ii_right  = "SLF II right",
+  t_slf.iii_left = "SLF III left", t_slf.iii_right = "SLF III right",
+  t_uf_left      = "UF left",      t_uf_right      = "UF right"
+)
+
+# tract_prefix(): strip metric suffix from a WM column name to get the tract_labels key.
+tract_prefix <- function(x) sub("\\.(fa1|tensor1\\..+)\\.mean$", "", x)
+
+# fit_wm(): Fit a multivariate linear regression for one WM metric.
+#
+# Returns a tibble with one row per tract: tract, statistic, p_fdr, beta.
+fit_wm <- function(dat,
+                   col_pattern,
+                   predictor   = "ctq_totalscore",
+                   covars_cont = "age",
+                   covars_cat  = "gender") {
+
+  y_mat <- dat %>% select(matches(col_pattern)) %>% as.matrix()
+  rhs   <- paste(c(predictor, covars_cont, covars_cat), collapse = " + ")
+
+  res_unst <- lm(as.formula(paste("y_mat ~", rhs)), data = dat) %>%
+    broom::tidy() %>%
+    mutate(p_fdr = p.adjust(p.value, method = "fdr")) %>%
+    filter(term == predictor) %>%
+    mutate(tract = tract_labels[tract_prefix(response)]) %>%
+    select(tract, statistic, p_fdr)
+
+  # Standardised model: z-score continuous predictors, extract β --------------
+  dat_sc <- dat %>%
+    mutate(across(all_of(c(predictor, covars_cont)), ~ as.numeric(scale(.x))))
+
+  res_sc <- lm(as.formula(paste("scale(y_mat) ~", rhs)), data = dat_sc) %>%
+    broom::tidy() %>%
+    filter(term == predictor) %>%
+    mutate(tract = tract_labels[tract_prefix(response)]) %>%
+    select(tract, beta = estimate)
+
+  left_join(res_unst, res_sc, by = "tract")
+}
+
+```
+
+# Statistical Analysis
+
+> *Methods:* Multivariate linear regression examined associations between childhood maltreatment (CM) severity and WM microstructure across 23 pre-selected tracts. CM severity (CTQ total score) was the independent variable. FDR correction (Benjamini-Hochberg, 5%) was applied across 23 tract comparisons. Significance threshold: *p* < .05.
+
+- **Outcome (Y):** WM tract metric (FA, MD, AD, or RD)
+- **Predictor (X):** CTQ total score
+- **Covariates:** Age, gender
+
+# Analysis
+
+```{r run_regressions, echo=FALSE}
+metrics <- list(
+  FA = "\\.fa1\\.mean$",
+  MD = "\\.tensor1\\.meandiffusivity\\.mean$",
+  AD = "\\.tensor1\\.maxeigenvalue\\.mean$",
+  RD = "\\.tensor1\\.mineigenvalue\\.mean$"
+)
+
+results <- imap(metrics, function(pattern, metric) {
+  fit_wm(dat, pattern) %>%
+    rename_with(~ paste0(metric, "_", .x), .cols = -tract)
+}) %>%
+  reduce(left_join, by = "tract")
+```
+
+# Results
+
+```{r results_table, echo=FALSE}
+tbl_ctq_wm <- results %>%
+  select(tract,
+         FA_p_fdr, FA_beta,
+         MD_p_fdr, MD_beta,
+         AD_p_fdr, AD_beta,
+         RD_p_fdr, RD_beta) %>%
+  gt() %>%
+  # Title: "Table 2." bold, rest regular (APA style)
+  tab_header(
+    title = html(paste0("<b>Table 2.</b> Multiple regression results between childhood maltreatment severity and white matter microstructure (<i>N</i> = ", nrow(dat), ")."))
+  ) %>%
+
+  # (B) Left-align the title/header (instead of centered)
+  tab_style(
+    style = cell_text(align = "left"),
+    locations = cells_title(groups = "title")
+  ) %>%
+
+  # Column spanners (bold)
+  tab_spanner(label = md("**Fractional anisotropy (FA)**"), columns = c(FA_p_fdr, FA_beta)) %>%
+  tab_spanner(label = md("**Mean diffusivity (MD)**"),      columns = c(MD_p_fdr, MD_beta)) %>%
+  tab_spanner(label = md("**Axial diffusivity (AD)**"),     columns = c(AD_p_fdr, AD_beta)) %>%
+  tab_spanner(label = md("**Radial diffusivity (RD)**"),    columns = c(RD_p_fdr, RD_beta)) %>%
+
+  # Sub-column labels: italic p with subscript FDR (not bold), beta bold
+  cols_label(
+    tract    = "",
+    FA_p_fdr = html("<i>p</i><sub>FDR</sub>"), FA_beta = md("**beta**"),
+    MD_p_fdr = html("<i>p</i><sub>FDR</sub>"), MD_beta = md("**beta**"),
+    AD_p_fdr = html("<i>p</i><sub>FDR</sub>"), AD_beta = md("**beta**"),
+    RD_p_fdr = html("<i>p</i><sub>FDR</sub>"), RD_beta = md("**beta**")
+  ) %>%
+
+  # Format numbers to 3 decimal places, then strip leading zero (0.xxx -> .xxx)
+  fmt_number(columns = -tract, decimals = 3) %>%
+  text_transform(
+    locations = cells_body(columns = -tract),
+    fn = function(x) {
+      x <- sub("^0\\.",      ".",      x)    # positive: 0.xxx -> .xxx
+      x <- sub("^\u22120\\.", "\u2212.", x)  # negative: −0.xxx -> −.xxx
+      x
+    }
+  ) %>%
+
+  # Bold significant p-values and their corresponding betas
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_body(columns = c(FA_p_fdr, FA_beta), rows = FA_p_fdr < 0.05)) %>%
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_body(columns = c(MD_p_fdr, MD_beta), rows = MD_p_fdr < 0.05)) %>%
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_body(columns = c(AD_p_fdr, AD_beta), rows = AD_p_fdr < 0.05)) %>%
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_body(columns = c(RD_p_fdr, RD_beta), rows = RD_p_fdr < 0.05)) %>%
+
+  # Bold tract names
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_body(columns = tract)) %>%
+
+  # Alignment (tract left, numbers centered)
+  cols_align(align = "left",   columns = tract) %>%
+  cols_align(align = "center", columns = -tract) %>%
+
+  # (A) Make header and numbers same size; only note smaller
+  tab_options(
+    table.font.size                   = "small",
+    source_notes.font.size            = "small",
+    data_row.padding                  = px(2),
+    heading.border.bottom.style       = "hidden",
+    table.border.top.style            = "solid",
+    table.border.bottom.style         = "solid",
+    column_labels.border.top.style    = "solid",
+    column_labels.border.bottom.style = "solid",
+    table_body.border.bottom.style    = "solid"
+  ) %>%
+
+  # Two-part note below the table
+  tab_source_note(
+    source_note = html(
+      "Higher childhood maltreatment severity was significantly associated with lower mean diffusivity and axial diffusivity in various white matter tracts. No significant associations were found with fractional anisotropy or radial diffusivity. All analyses were corrected for age and gender as covariates.<br><i>Note.</i> FA, fractional anisotropy; MD, mean diffusivity; AD, axial diffusivity; RD, radial diffusivity; FDR, false-discovery rate; AF, arcuate fasciculus; CB, cingulum bundle; CC, corpus callosum; ILF, inferior longitudinal fasciculus; IoFF, inferior occipito-frontal fasciculus; SLF, superior longitudinal fasciculus; UF, uncinate fasciculus."
+    )
+  )
+
+tbl_ctq_wm
+
+gtsave(tbl_ctq_wm,
+       here("output", "tables", "main", "Table2_CTQ_WM.html"))
+
+write.csv(results,
+          here("output", "results", "main", "CTQ_WM_results.csv"),
+          row.names = FALSE)
+```
+
+

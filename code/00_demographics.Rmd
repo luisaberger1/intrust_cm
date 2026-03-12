@@ -1,0 +1,341 @@
+---
+title: "INTRuST CM — Sample Characteristics"
+author: "Luisa Berger"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+
+suppressPackageStartupMessages({
+  library(here)
+  library(tidyverse)
+  library(gtsummary)
+  library(psych)
+  library(gt)
+})
+
+dat <- readr::read_csv(
+  here("data", "analysis_simulated.csv"),
+  show_col_types = FALSE,
+  name_repair = "minimal"
+)
+
+# Create output directories if absent
+dir.create(here("output", "tables", "main"),          showWarnings = FALSE, recursive = TRUE)
+dir.create(here("output", "tables", "supplementary"), showWarnings = FALSE, recursive = TRUE)
+
+dat <- dat %>%
+  mutate(
+    gender = factor(gender, levels = c("1", "2"), labels = c("Male", "Female")),
+    race = factor(race,
+      levels = c("1","2","3","4","5","6"),
+      labels = c("Native","Asian","Pacific","African American","White","Unknown")
+    ),
+    tbi.diagnosis  = factor(tbi.diagnosis,  levels = c("0", "1"), labels = c("No mTBI", "mTBI")),
+    ptsd.diagnosis = factor(ptsd.diagnosis, levels = c("No PTSD", "PTSD"))
+  )
+```
+
+# Table 1. Demographic and clinical characteristics.
+
+```{r table1, echo=FALSE}
+# Comorbid PTSD + mTBI count for Table 1 note
+n_comorbid <- sum(dat$ptsd.diagnosis == "PTSD" & dat$tbi.diagnosis == "mTBI", na.rm = TRUE)
+
+# Pre-compute range strings for continuous variables
+make_range <- function(x) sprintf("%g \u2013 %g", min(x, na.rm = TRUE), max(x, na.rm = TRUE))
+cont_ranges <- c(
+  age                         = make_range(dat$age),
+  ctq_totalscore              = make_range(dat$ctq_totalscore),
+  pcl_total                       = make_range(dat$pcl_total),
+  rpq13_total                     = make_range(dat$rpq13_total),
+  phq9_score                  = make_range(dat$phq9_score)
+)
+
+table1 <- tbl_stack(
+  list(
+    dat %>%
+      select(age, gender, race) %>%
+      tbl_summary(
+        missing = "no",
+        percent = "column",
+        type    = all_continuous() ~ "continuous",
+        label   = list(
+          age    ~ "Age (years)",
+          gender ~ "Gender",
+          race   ~ "Race"
+        ),
+        statistic = list(
+          all_continuous()  ~ "{mean} ({sd})",
+          all_categorical() ~ "{n} ({p}%)"
+        ),
+        digits = all_continuous() ~ 2
+      ) %>%
+      add_n(),
+
+    dat %>%
+      select(ctq_totalscore, pcl_total, rpq13_total,
+             ptsd.diagnosis, tbi.diagnosis, phq9_score) %>%
+      tbl_summary(
+        missing = "no",
+        percent = "column",
+        type    = all_continuous() ~ "continuous",
+        label   = list(
+          ctq_totalscore              ~ "CTQ",
+          pcl_total                       ~ "PCL-C",
+          rpq13_total                     ~ "RPQ-13",
+          ptsd.diagnosis                  ~ "PTSD diagnosis",
+          tbi.diagnosis                   ~ "mTBI diagnosis",
+          phq9_score                  ~ "PHQ-9"
+        ),
+        statistic = list(
+          all_continuous()  ~ "{mean} ({sd})",
+          all_categorical() ~ "{n} ({p}%)"
+        ),
+        digits = all_continuous() ~ 2
+      ) %>%
+      add_n()
+  ),
+  group_header = c("Demographic characteristics", "Clinical characteristics")
+) %>%
+  modify_table_body(
+    ~ .x %>%
+      mutate(
+        Range = ifelse(
+          row_type == "label" & var_type == "continuous",
+          cont_ranges[variable],
+          NA_character_
+        ),
+        n_level = ifelse(
+          row_type == "level" & var_type == "categorical",
+          str_match(stat_0, "^(\\d+)\\s*\\(([^)]+)\\)$")[, 2],
+          NA_character_
+        ),
+        p_level = ifelse(
+          row_type == "level" & var_type == "categorical",
+          str_match(stat_0, "^(\\d+)\\s*\\(([^)]+)\\)$")[, 3],
+          NA_character_
+        ),
+        stat_0 = ifelse(row_type == "level" & var_type == "categorical", p_level, stat_0)
+      ) %>%
+      rename(N = n) %>%
+      mutate(n = ifelse(row_type == "level" & var_type == "categorical", n_level, NA_character_)) %>%
+      select(-n_level, -p_level)
+  ) %>%
+  modify_header(
+    label  ~ "",
+    N      ~ "**N**",
+    n      ~ "**n**",
+    stat_0 ~ "**Mean (SD);<br>% of total sample**",
+    Range  ~ "**Range**"
+  ) %>%
+  as_gt() %>%
+  cols_move(columns = c(n, stat_0, Range), after = N) %>%
+  tab_header(
+    title = html("<b>Table 1.</b> Demographic and clinical characteristics.")
+  ) %>%
+  tab_style(
+    style     = cell_text(align = "left"),
+    locations = cells_title(groups = "title")
+  ) %>%
+  tab_options(heading.align = "left") %>%
+  tab_source_note(
+    source_note = html(
+      paste0("<em>Note.</em> CTQ = Childhood Trauma Questionnaire; PCL-C = PTSD Checklist Civilian-Version; PCL-M = PTSD Checklist Military-Version; RPQ-13 = Rivermead Post-Concussion Symptoms Questionnaire; PHQ-9 = Patient Health Questionnaire-9. PTSD and mTBI diagnostic categories are not mutually exclusive; ", n_comorbid, " participants were comorbid for PTSD and mTBI.")
+    )
+  )
+
+gtsave(table1, here("output", "tables", "main", "Table1_Demographics.html"))
+table1
+```
+
+# Table S9. Prevalence of childhood maltreatment types.
+
+```{r table_s9, echo=FALSE}
+cut_ctq <- function(x, cuts) {
+  cut(x, breaks = c(-Inf, cuts, Inf),
+      labels = c("None", "Low", "Moderate", "Severe"),
+      right = TRUE, include.lowest = TRUE)
+}
+
+dat_s9 <- dat %>%
+  mutate(
+    EN_cat = cut_ctq(ctq_emoneg_score, c(9, 13, 17)),
+    PN_cat = cut_ctq(ctq_physneg_score, c(7, 9, 12)),
+    EA_cat = cut_ctq(ctq_emo_score,     c(8, 12, 15)),
+    PA_cat = cut_ctq(ctq_phys_score,    c(7, 9,  12)),
+    SA_cat = cut_ctq(ctq_sex_score,     c(5, 7,  12))
+  )
+
+levs   <- c("None", "Low", "Moderate", "Severe")
+tab_s9 <- list(
+  `Emotional neglect` = prop.table(table(factor(dat_s9$EN_cat, levels = levs))) * 100,
+  `Physical neglect`  = prop.table(table(factor(dat_s9$PN_cat, levels = levs))) * 100,
+  `Emotional abuse`   = prop.table(table(factor(dat_s9$EA_cat, levels = levs))) * 100,
+  `Physical abuse`    = prop.table(table(factor(dat_s9$PA_cat, levels = levs))) * 100,
+  `Sexual abuse`      = prop.table(table(factor(dat_s9$SA_cat, levels = levs))) * 100
+)
+
+df_s9 <- do.call(rbind, lapply(names(tab_s9), function(nm) {
+  out <- round(as.numeric(tab_s9[[nm]]), 1)
+  data.frame(
+    Subscale       = nm,
+    `None (%)`     = out[1],
+    `Low (%)`      = out[2],
+    `Moderate (%)` = out[3],
+    `Severe (%)`   = out[4],
+    check.names = FALSE
+  )
+}))
+
+tbl_s9 <- df_s9 |>
+  gt() |>
+  tab_header(
+    title = html("<b>Table S9.</b> Prevalence of childhood maltreatment types.")
+  ) |>
+  tab_style(style = cell_text(align = "left"), locations = cells_title(groups = "title")) |>
+  cols_label(Subscale = "") |>
+  cols_align(align = "left",   columns = Subscale) |>
+  cols_align(align = "center", columns = -Subscale) |>
+  tab_options(
+    table.font.size                   = "small",
+    source_notes.font.size            = "small",
+    data_row.padding                  = px(2),
+    heading.border.bottom.style       = "hidden",
+    table.border.top.style            = "solid",
+    table.border.bottom.style         = "solid",
+    column_labels.border.top.style    = "solid",
+    column_labels.border.bottom.style = "solid",
+    table_body.border.bottom.style    = "solid"
+  ) |>
+  tab_source_note(source_note = html(
+    "<em>Note.</em> Values are percentages of participants within each severity category using CTQ manual cutoffs (Bernstein &amp; Fink, 1998; Bernstein et al., 2003)."
+  ))
+
+gtsave(tbl_s9, here("output", "tables", "supplementary", "TableS9_CTQ_Prevalence.html"))
+tbl_s9
+```
+
+# Table S10. Summary of childhood maltreatment characteristics.
+
+```{r table_s10, echo=FALSE}
+measures <- tibble(
+  Measure = c("CTQ total", "Emotional neglect", "Physical neglect",
+              "Emotional abuse", "Physical abuse", "Sexual abuse"),
+  col     = c("ctq_totalscore", "ctq_emoneg_score", "ctq_physneg_score",
+              "ctq_emo_score",  "ctq_phys_score",   "ctq_sex_score"),
+  dx_col  = c("ctq_diagnosis_total",
+              "ctq_diagnosis_emoneg_score", "ctq_diagnosis_physneg_score",
+              "ctq_diagnosis_emo_score",    "ctq_diagnosis_phys_score",
+              "ctq_diagnosis_sex_score"),
+  cutoff  = c("\u2265 41", "\u2265 13", "\u2265 10", "\u2265 15", "\u2265 10", "\u2265 8")
+)
+
+df_s10 <- measures %>%
+  rowwise() %>%
+  mutate(
+    N           = sum(!is.na(dat[[col]])),
+    `Mean (SD)` = sprintf("%.2f (%.2f)",
+                          mean(dat[[col]], na.rm = TRUE),
+                          sd(dat[[col]],   na.rm = TRUE)),
+    Range       = sprintf("%g \u2013 %g",
+                          min(dat[[col]], na.rm = TRUE),
+                          max(dat[[col]], na.rm = TRUE)),
+    n_meet      = sum(as.numeric(dat[[dx_col]]) != 0, na.rm = TRUE),
+    pct         = sprintf("%d%%", round(n_meet / nrow(dat) * 100))
+  ) %>%
+  ungroup() %>%
+  select(Measure, N, `Mean (SD)`, Range, `Cut-off` = cutoff,
+         n = n_meet, `% of total sample` = pct)
+
+tbl_s10 <- df_s10 |>
+  gt() |>
+  tab_header(
+    title = html("<b>Table S10.</b> Summary of childhood maltreatment characteristics.")
+  ) |>
+  tab_style(style = cell_text(align = "left"),  locations = cells_title(groups = "title")) |>
+  tab_style(style = cell_text(weight = "bold"), locations = cells_body(columns = Measure)) |>
+  cols_label(Measure = "") |>
+  cols_align(align = "left",  columns = Measure) |>
+  cols_align(align = "right", columns = -Measure) |>
+  tab_options(
+    table.font.size                   = "small",
+    source_notes.font.size            = "small",
+    data_row.padding                  = px(2),
+    heading.border.bottom.style       = "hidden",
+    table.border.top.style            = "solid",
+    table.border.bottom.style         = "solid",
+    column_labels.border.top.style    = "solid",
+    column_labels.border.bottom.style = "solid",
+    table_body.border.bottom.style    = "solid"
+  ) |>
+  tab_source_note(source_note = html(
+    "<em>Note.</em> CTQ, Childhood Trauma Questionnaire. This table displays frequencies of total childhood maltreatment and childhood maltreatment types according to the criteria for moderate exposure as outlined by Bernstein et al. (2003)."
+  ))
+
+gtsave(tbl_s10, here("output", "tables", "supplementary", "TableS10_CTQ_Summary.html"))
+tbl_s10
+```
+
+# Table S11. Spearman correlations among CTQ subscales.
+
+```{r table_s11, echo=FALSE}
+vars <- c("ctq_emoneg_score", "ctq_physneg_score",
+          "ctq_emo_score",    "ctq_phys_score",    "ctq_sex_score")
+
+ct  <- psych::corr.test(dat[, vars], method = "spearman")
+r   <- round(ct$r, 2)
+p   <- ct$p
+k   <- ncol(r)
+
+stars <- function(x) ifelse(x < .001, "***", ifelse(x < .01, "**", ifelse(x < .05, "*", "")))
+out   <- matrix("", k, k); diag(out) <- "\u2014"
+idx   <- which(lower.tri(out), arr.ind = TRUE)
+out[idx] <- paste0(sprintf("%.2f", r[idx]), stars(p[idx]))
+
+rowlabs <- c("1. Emotional neglect", "2. Physical neglect", "3. Emotional abuse",
+             "4. Physical abuse",    "5. Sexual abuse")
+
+tab_s11 <- data.frame(
+  Subscale = rowlabs,
+  `1. EN`  = out[, 1], `2. PN` = out[, 2], `3. EA` = out[, 3],
+  `4. PA`  = out[, 4], `5. SA` = out[, 5],
+  check.names = FALSE
+)
+
+tbl_s11 <- tab_s11 |>
+  gt() |>
+  tab_header(
+    title = html(paste0(
+      "<b>Table S11.</b> Spearman correlations among CTQ subscales (<i>N</i> = ", nrow(dat), ")."
+    ))
+  ) |>
+  tab_style(style = cell_text(align = "left"),  locations = cells_title(groups = "title")) |>
+  tab_style(style = cell_text(weight = "bold"), locations = cells_body(columns = Subscale)) |>
+  cols_label(Subscale = "") |>
+  cols_align(align = "left",   columns = Subscale) |>
+  cols_align(align = "center", columns = -Subscale) |>
+  tab_options(
+    table.font.size                   = "small",
+    source_notes.font.size            = "small",
+    data_row.padding                  = px(2),
+    heading.border.bottom.style       = "hidden",
+    table.border.top.style            = "solid",
+    table.border.bottom.style         = "solid",
+    column_labels.border.top.style    = "solid",
+    column_labels.border.bottom.style = "solid",
+    table_body.border.bottom.style    = "solid"
+  ) |>
+  tab_source_note(source_note = html(
+    "<em>Note.</em> Values are Spearman\u2019s \u03c1. Lower triangle shown; diagonal entries are em dashes. EN = Emotional Neglect; PN = Physical Neglect; EA = Emotional Abuse; PA = Physical Abuse; SA = Sexual Abuse. *<em>p</em> < .05, **<em>p</em> < .01, ***<em>p</em> < .001."
+  ))
+
+gtsave(tbl_s11, here("output", "tables", "supplementary", "TableS11_CTQ_Correlations.html"))
+tbl_s11
+```

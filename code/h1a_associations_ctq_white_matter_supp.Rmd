@@ -1,0 +1,1032 @@
+---
+title: "INTRuST CM — H1a Supplementary: CTQ and White Matter Microstructure"
+author: "Luisa Berger"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+# Document Overview
+
+This document contains supplementary regression analyses for
+**H1a: CTQ total score and white matter (WM) microstructure**.
+
+| Table | Analysis | Purpose |
+|-------|----------|---------|
+| S2  | Additional covariates (race; race + alcohol) | Robustness to demographic confounds |
+| S5  | HC3 SEs + BCa bootstrap 95% CIs | Robustness to heteroscedasticity |
+| S6  | Excluding PTSD-only subgroup | Sensitivity to influential subgroup |
+| S12 | CTQ subscale analyses (MD + AD) | Exploring which subtype drives main effects |
+
+**Reproduce this document:** open `intrust_cm.Rproj` and click *Knit*, or run
+`rmarkdown::render(here::here("code/h1a_associations_ctq_white_matter_supp.Rmd"))`.
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+
+suppressPackageStartupMessages({
+  library(here)
+  library(tidyverse)
+  library(broom)
+  # HC3 robust SEs and BCa bootstrap
+  library(sandwich)
+  library(lmtest)
+  library(boot)
+  # Table rendering (all tables use gt for HTML output)
+  library(gt)
+})
+
+set.seed(1234)
+
+# ---- Data --------------------------------------------------------------------
+
+dat <- readr::read_csv(
+  here("data", "analysis_simulated.csv"),
+  show_col_types = FALSE,
+  name_repair    = "minimal"
+)
+
+dat$ctq_totalscore <- as.numeric(dat$ctq_totalscore)
+dat$age             <- as.numeric(dat$age)
+dat$gender          <- as.numeric(dat$gender)
+dat$race            <- as.numeric(dat$race)
+dat$audit_10_score  <- as.numeric(dat$audit_10_score)
+
+# ---- Output directory --------------------------------------------------------
+# HTML tables are saved under output/tables/supplementary/.
+dir.create(here("output", "tables", "supplementary"),
+           showWarnings = FALSE, recursive = TRUE)
+```
+
+```{r define_lookup, include=FALSE}
+# ==============================================================================
+# Tract ordering and column-name conventions.
+# ==============================================================================
+
+# Order of the 23 pre-selected WM tracts
+tract_stems <- c(
+  "t_af_left",      "t_af_right",
+  "t_cb_left",      "t_cb_right",
+  paste0("t_cc", 1:7),
+  "t_ilf_left",     "t_ilf_right",
+  "t_ioff_left",    "t_ioff_right",
+  "t_slf.i_left",   "t_slf.i_right",
+  "t_slf.ii_left",  "t_slf.ii_right",
+  "t_slf.iii_left", "t_slf.iii_right",
+  "t_uf_left",      "t_uf_right"
+)
+
+# Column-name suffixes for each diffusion metric
+metric_suffixes <- list(
+  FA = ".fa1.mean",
+  MD = ".tensor1.meandiffusivity.mean",
+  AD = ".tensor1.maxeigenvalue.mean",
+  RD = ".tensor1.mineigenvalue.mean"
+)
+
+# Tract labels
+tract_pretty <- c(
+  "AF left",      "AF right",
+  "CB left",      "CB right",
+  paste0("CC ", 1:7),
+  "ILF left",     "ILF right",
+  "IoFF left",    "IoFF right",
+  "SLF I left",   "SLF I right",
+  "SLF II left",  "SLF II right",
+  "SLF III left", "SLF III right",
+  "UF left",      "UF right"
+)
+names(tract_pretty) <- paste0("Y", seq_along(tract_pretty))
+
+# All expected WM columns must be present in dat.
+all_wm_cols <- as.vector(outer(tract_stems, unlist(metric_suffixes), paste0))
+missing_wm  <- setdiff(all_wm_cols, names(dat))
+if (length(missing_wm) > 0) {
+  stop("define_lookup: the following expected WM columns are absent from dat:\n  ",
+       paste(missing_wm, collapse = "\n  "))
+}
+
+# Check predictor, grouping, and additional covariate columns.
+stopifnot(
+  "Required columns missing from dat — check analysis_simulated.csv" =
+    all(c("ctq_totalscore", "age", "gender",
+          "race", "audit_10_score",
+          "hc.ptsd.mtbi.groups.4groups",
+          "ctq_physneg_score") %in% names(dat))
+)
+```
+
+```{r helpers, include=FALSE}
+# ==============================================================================
+# Helper functions shared across all analysis sections.
+# ==============================================================================
+
+# strip0() ─────────────────────────────────────────────────────────────────────
+# Remove the leading zero from a formatted number, including negatives.
+# e.g. "0.123" -> ".123",  "-0.123" -> "-.123"
+strip0 <- function(x) gsub("(?<=^|-)0\\.", ".", x, perl = TRUE)
+
+
+# fit_ols_wm(): multivariate OLS + standardised model for WM tract outcomes.
+# Returns list(out = CTQ-row tidy table, beta = standardised betas).
+fit_ols_wm <- function(values, data, predictor, p_fdr_col) {
+
+  rhs    <- paste(c(predictor, "age", "gender"), collapse = " + ")
+  rhs_sc <- paste(
+    paste0("scale(", c(predictor, "age", "gender"), ")"),
+    collapse = " + "
+  )
+
+  lm_fit          <- lm(as.formula(paste("values ~", rhs)), data = data)
+  tt              <- broom::tidy(lm_fit)
+  tt[[p_fdr_col]] <- p.adjust(tt$p.value, method = "fdr")
+
+  out <- tt |>
+    dplyr::filter(term == predictor) |>
+    dplyr::mutate(
+      p.value      = formatC(p.value,               digits = 3, format = "f"),
+      !!p_fdr_col := formatC(.data[[p_fdr_col]], digits = 3, format = "f")
+    ) |>
+    dplyr::select(response, statistic, p.value, dplyr::all_of(p_fdr_col))
+
+  lm_sc <- lm(as.formula(paste("scale(values) ~", rhs_sc)), data = data)
+  beta  <- broom::tidy(lm_sc) |>
+    dplyr::filter(term == paste0("scale(", predictor, ")")) |>
+    dplyr::mutate(estimate = formatC(estimate, digits = 3, format = "f")) |>
+    dplyr::select(response, estimate)
+
+  invisible(list(out = out, beta = beta))
+}
+
+
+# fit_hc3_bca(): per-tract HC3 SEs and BCa bootstrap CIs on standardised betas.
+# Returns tibble with p_HC3, pFDR_HC3, HC3_lo/hi_std, BCa_lo/hi_std.
+fit_hc3_bca <- function(values, ynames, data, predictor, R_boot = 5000) {
+
+  rhs <- paste(c(predictor, "age", "gender"), collapse = " + ")
+
+  # (A) HC3 p-values: unstandardised model, BH FDR across all terms × tracts --
+  hc3_all <- purrr::map_dfr(seq_along(ynames), function(i) {
+    y   <- as.numeric(values[, i])
+    fit <- lm(as.formula(paste("y ~", rhs)), data = data)
+    Vh  <- sandwich::vcovHC(fit, type = "HC3")
+    ct  <- broom::tidy(
+      lmtest::coeftest(fit, vcov. = Vh, df = stats::df.residual(fit))
+    )
+    dplyr::mutate(ct, response = ynames[i], .before = 1) |>
+      dplyr::select(response, term, p.value) |>
+      dplyr::rename(p_HC3 = p.value)
+  })
+  hc3_all$pFDR_HC3_all <- p.adjust(hc3_all$p_HC3, method = "BH")
+
+  hc3_p <- hc3_all |>
+    dplyr::filter(term == predictor) |>
+    dplyr::select(response, p_HC3, pFDR_HC3 = pFDR_HC3_all)
+
+  # (B) Standardised HC3 CIs + BCa bootstrap for predictor only ----------------
+  hc3_ci <- purrr::map_dfr(seq_along(ynames), function(i) {
+    y  <- as.numeric(values[, i])
+    df <- data.frame(
+      y_s      = scale(y)[, 1],
+      ctq_s    = scale(data[[predictor]])[, 1],
+      age_s    = scale(data$age)[, 1],
+      gender_s = scale(data$gender)[, 1]
+    )
+    fit <- lm(y_s ~ ctq_s + age_s + gender_s, data = df)
+    Vh  <- sandwich::vcovHC(fit, type = "HC3")
+    ci  <- lmtest::coefci(fit, vcov. = Vh, df = stats::df.residual(fit))["ctq_s", ]
+
+    stat_fun <- function(d, idx) {
+      unname(coef(
+        lm(y_s ~ ctq_s + age_s + gender_s, data = d[idx, , drop = FALSE])
+      )["ctq_s"])
+    }
+    bobj <- boot::boot(df, statistic = stat_fun, R = R_boot)
+    bca  <- tryCatch(
+      boot::boot.ci(bobj, type = "bca", index = 1)$bca[4:5],
+      error = function(e) c(NA_real_, NA_real_)
+    )
+
+    tibble::tibble(
+      response   = ynames[i],
+      HC3_lo_std = ci[1], HC3_hi_std = ci[2],
+      BCa_lo_std = bca[1], BCa_hi_std = bca[2]
+    )
+  })
+
+  invisible(dplyr::left_join(hc3_p, hc3_ci, by = "response"))
+}
+
+
+# build_hc3_table() ────────────────────────────────────────────────────────────
+#
+# `ols_out`      : output of fit_ols_wm()$out for this metric.
+# `ols_beta`     : output of fit_ols_wm()$beta for this metric.
+# `hc3`          : output of fit_hc3_bca() for this metric.
+# `tract_labels` : named vector (Y1..Y23 -> readable names) for row labels
+#                  and ordering.
+# `p_fdr_col`    : name of the FDR column in ols_out, e.g. "p.fdr.fa".
+build_hc3_table <- function(ols_out, ols_beta, hc3, tract_labels, p_fdr_col) {
+  ols_out |>
+    dplyr::left_join(ols_beta, by = "response") |>
+    dplyr::left_join(hc3,      by = "response") |>
+    dplyr::mutate(
+      Tract          = tract_labels[response],
+      beta_std       = strip0(sprintf("%.3f", as.numeric(estimate))),
+      statistic      = strip0(sprintf("%.3f", as.numeric(statistic))),
+      `p (OLS)`      = strip0(sprintf("%.3f", as.numeric(p.value))),
+      `pFDR (OLS)`   = strip0(sprintf("%.3f", as.numeric(.data[[p_fdr_col]]))),
+      `p (HC3)`      = strip0(sprintf("%.3f", p_HC3)),
+      `pFDR (HC3)`   = strip0(sprintf("%.3f", pFDR_HC3)),
+      `95% CI (HC3)` = paste0("[", strip0(sprintf("%.3f", HC3_lo_std)), ", ",
+                               strip0(sprintf("%.3f", HC3_hi_std)), "]"),
+      `95% CI (BCa)` = paste0("[", strip0(sprintf("%.3f", BCa_lo_std)), ", ",
+                               strip0(sprintf("%.3f", BCa_hi_std)), "]")
+    ) |>
+    dplyr::select(
+      Tract, beta_std, statistic,
+      `p (OLS)`, `pFDR (OLS)`,
+      `p (HC3)`, `pFDR (HC3)`,
+      `95% CI (HC3)`, `95% CI (BCa)`
+    ) |>
+    dplyr::arrange(factor(Tract, levels = tract_labels))
+}
+
+
+# make_gt() ────────────────────────────────────────────────────────────────────
+make_gt <- function(tbl, caption, note) {
+  tbl |>
+    gt() |>
+    tab_header(title = html(paste0("<b>", caption, "</b>"))) |>
+    tab_style(
+      style     = cell_text(align = "left"),
+      locations = cells_title(groups = "title")
+    ) |>
+    cols_label(
+      Tract          = "Tract",
+      beta_std       = html("\u03b2"),
+      statistic      = html("<i>t</i>"),
+      `p (OLS)`      = html("<i>p</i> (OLS)"),
+      `pFDR (OLS)`   = html("<i>p</i><sub>FDR</sub> (OLS)"),
+      `p (HC3)`      = html("<i>p</i> (HC3)"),
+      `pFDR (HC3)`   = html("<i>p</i><sub>FDR</sub> (HC3)"),
+      `95% CI (HC3)` = "95% CI (HC3)",
+      `95% CI (BCa)` = "95% CI (BCa)"
+    ) |>
+    cols_align(align = "left",   columns = Tract) |>
+    cols_align(align = "center", columns = -Tract) |>
+    tab_options(
+      table.font.size                   = "small",
+      source_notes.font.size            = "small",
+      data_row.padding                  = px(2),
+      heading.border.bottom.style       = "hidden",
+      table.border.top.style            = "solid",
+      table.border.bottom.style         = "solid",
+      column_labels.border.top.style    = "solid",
+      column_labels.border.bottom.style = "solid",
+      table_body.border.bottom.style    = "solid"
+    ) |>
+    tab_source_note(source_note = html(paste0("<i>Note.</i> ", note)))
+}
+
+
+# ==============================================================================
+# Helpers for Table S2
+# ==============================================================================
+
+# tract_labels / tract_prefix() ────────────────────────────────────────────────
+# Map full WM column names to readable tract labels
+tract_labels <- c(
+  t_af_left      = "AF left",      t_af_right      = "AF right",
+  t_cb_left      = "CB left",      t_cb_right      = "CB right",
+  t_cc1          = "CC 1",         t_cc2           = "CC 2",
+  t_cc3          = "CC 3",         t_cc4           = "CC 4",
+  t_cc5          = "CC 5",         t_cc6           = "CC 6",
+  t_cc7          = "CC 7",
+  t_ilf_left     = "ILF left",     t_ilf_right     = "ILF right",
+  t_ioff_left    = "IoFF left",    t_ioff_right    = "IoFF right",
+  t_slf.i_left   = "SLF I left",   t_slf.i_right   = "SLF I right",
+  t_slf.ii_left  = "SLF II left",  t_slf.ii_right  = "SLF II right",
+  t_slf.iii_left = "SLF III left", t_slf.iii_right = "SLF III right",
+  t_uf_left      = "UF left",      t_uf_right      = "UF right"
+)
+
+tract_prefix <- function(x) sub("\\.(fa1|tensor1\\..+)\\.mean$", "", x)
+
+
+# fit_wm() ─────────────────────────────────────────────────────────────────────
+# Fit a multivariate linear regression for one WM metric.
+#
+# Returns a tibble: tract, statistic, p_fdr, beta.
+fit_wm <- function(dat,
+                   col_pattern,
+                   predictor   = "ctq_totalscore",
+                   covars_cont = "age",
+                   covars_cat  = "gender") {
+
+  y_mat <- dat %>% select(matches(col_pattern)) %>% as.matrix()
+  rhs   <- paste(c(predictor, covars_cont, covars_cat), collapse = " + ")
+
+  # Unstandardised model: FDR across all terms × tracts, then filter to predictor
+  res_unst <- lm(as.formula(paste("y_mat ~", rhs)), data = dat) %>%
+    broom::tidy() %>%
+    mutate(p_fdr = p.adjust(p.value, method = "fdr")) %>%
+    filter(term == predictor) %>%
+    mutate(tract = tract_labels[tract_prefix(response)]) %>%
+    select(tract, statistic, p_fdr)
+
+  # Standardised model: z-score continuous predictors, extract β
+  dat_sc <- dat %>%
+    mutate(across(all_of(c(predictor, covars_cont)), ~ as.numeric(scale(.x))))
+
+  res_sc <- lm(as.formula(paste("scale(y_mat) ~", rhs)), data = dat_sc) %>%
+    broom::tidy() %>%
+    filter(term == predictor) %>%
+    mutate(tract = tract_labels[tract_prefix(response)]) %>%
+    select(tract, beta = estimate)
+
+  left_join(res_unst, res_sc, by = "tract")
+}
+
+
+# make_s2_table() ──────────────────────────────────────────────────────────────
+# Render an APA-style gt table for Table S2.
+#
+# `results`     : joined tibble (tract, FA_p_fdr, FA_beta, MD_*, AD_*, RD_*).
+# `table_label` : bold table identifier, e.g. "Table S2a."
+# `covar_note`  : covariate string for the source note.
+# `n`           : sample size shown in the title.
+make_s2_table <- function(results, table_label, covar_note, n) {
+  results |>
+    dplyr::select(tract,
+                  FA_p_fdr, FA_beta,
+                  MD_p_fdr, MD_beta,
+                  AD_p_fdr, AD_beta,
+                  RD_p_fdr, RD_beta) |>
+    gt::gt() |>
+    gt::tab_header(
+      title = gt::html(paste0(
+        "<b>", table_label, "</b> Multiple regression results between childhood ",
+        "maltreatment severity and white matter microstructure (<i>N</i> = ", n, ")."
+      ))
+    ) |>
+    gt::tab_style(
+      style     = gt::cell_text(align = "left"),
+      locations = gt::cells_title(groups = "title")
+    ) |>
+    gt::tab_spanner(label = gt::md("**Fractional anisotropy (FA)**"), columns = c(FA_p_fdr, FA_beta)) |>
+    gt::tab_spanner(label = gt::md("**Mean diffusivity (MD)**"),      columns = c(MD_p_fdr, MD_beta)) |>
+    gt::tab_spanner(label = gt::md("**Axial diffusivity (AD)**"),     columns = c(AD_p_fdr, AD_beta)) |>
+    gt::tab_spanner(label = gt::md("**Radial diffusivity (RD)**"),    columns = c(RD_p_fdr, RD_beta)) |>
+    gt::cols_label(
+      tract    = "",
+      FA_p_fdr = gt::html("<i>p</i><sub>FDR</sub>"), FA_beta = gt::md("**beta**"),
+      MD_p_fdr = gt::html("<i>p</i><sub>FDR</sub>"), MD_beta = gt::md("**beta**"),
+      AD_p_fdr = gt::html("<i>p</i><sub>FDR</sub>"), AD_beta = gt::md("**beta**"),
+      RD_p_fdr = gt::html("<i>p</i><sub>FDR</sub>"), RD_beta = gt::md("**beta**")
+    ) |>
+    gt::fmt_number(columns = -tract, decimals = 3) |>
+    gt::text_transform(
+      locations = gt::cells_body(columns = -tract),
+      fn = function(x) {
+        x <- sub("^0\\.",       ".",       x)   # 0.xxx  -> .xxx
+        x <- sub("^\u22120\\.", "\u2212.", x)   # −0.xxx -> −.xxx
+        x
+      }
+    ) |>
+    gt::tab_style(style = gt::cell_text(weight = "bold"),
+                  locations = gt::cells_body(columns = c(FA_p_fdr, FA_beta), rows = FA_p_fdr < 0.05)) |>
+    gt::tab_style(style = gt::cell_text(weight = "bold"),
+                  locations = gt::cells_body(columns = c(MD_p_fdr, MD_beta), rows = MD_p_fdr < 0.05)) |>
+    gt::tab_style(style = gt::cell_text(weight = "bold"),
+                  locations = gt::cells_body(columns = c(AD_p_fdr, AD_beta), rows = AD_p_fdr < 0.05)) |>
+    gt::tab_style(style = gt::cell_text(weight = "bold"),
+                  locations = gt::cells_body(columns = c(RD_p_fdr, RD_beta), rows = RD_p_fdr < 0.05)) |>
+    gt::tab_style(style = gt::cell_text(weight = "bold"),
+                  locations = gt::cells_body(columns = tract)) |>
+    gt::cols_align(align = "left",   columns = tract) |>
+    gt::cols_align(align = "center", columns = -tract) |>
+    gt::tab_options(
+      table.font.size                   = "small",
+      source_notes.font.size            = "small",
+      data_row.padding                  = gt::px(2),
+      heading.border.bottom.style       = "hidden",
+      table.border.top.style            = "solid",
+      table.border.bottom.style         = "solid",
+      column_labels.border.top.style    = "solid",
+      column_labels.border.bottom.style = "solid",
+      table_body.border.bottom.style    = "solid"
+    ) |>
+    gt::tab_source_note(
+      source_note = gt::html(paste0(
+        "All analyses were corrected for ", covar_note, " as covariates.<br>",
+        "<i>Note.</i> FA, fractional anisotropy; MD, mean diffusivity; AD, axial diffusivity; ",
+        "RD, radial diffusivity; FDR, false-discovery rate; AF, arcuate fasciculus; ",
+        "CB, cingulum bundle; CC, corpus callosum; ILF, inferior longitudinal fasciculus; ",
+        "IoFF, inferior occipito-frontal fasciculus; SLF, superior longitudinal fasciculus; ",
+        "UF, uncinate fasciculus."
+      ))
+    )
+}
+```
+
+---
+
+# Statistical Analysis
+
+> *Overview:* This document contains four supplementary analyses extending the
+> primary H1a regression results (*N* = `r nrow(dat)` participants, 23 WM tracts,
+> four diffusion metrics: FA, MD, AD, RD). Unless noted otherwise, all analyses
+> share the same predictor (**CTQ total score**), covariates (**age, gender**), and
+> FDR correction strategy (**Benjamini–Hochberg, *q* < .05, applied within each
+> diffusion metric across all model terms × 23 tracts**) as the primary analysis.
+
+---
+
+# Table S2: Post-Hoc Analyses with Additional Covariates
+
+> *Methods (Table S2):* The primary H1a regressions are repeated twice with
+> expanded covariate sets to assess whether associations between CTQ and WM
+> microstructure are robust to demographic confounds not included in the primary
+> model. **Model 1** adds race. **Model 2** adds race and alcohol use.
+>
+> - **Outcome (Y):** WM tract metric (FA, MD, AD, RD), 23 tracts
+> - **Predictor (X):** CTQ total score
+> - **Model 1 covariates:** Age, gender, race
+> - **Model 2 covariates:** Age, gender, race, alcohol use (AUDIT-10)
+
+The same `fit_wm()` function used in the primary H1a analysis is used here
+with the `covars_cont` argument extended to include `race` (Model 1) and
+additionally `audit_10_score` (Model 2). Continuous additional covariates
+are z-scored in the standardised model alongside age and CTQ. Results are
+displayed with the same gt table style as Table 2 in the main script.
+
+---
+
+## Model 1: Age, Gender, Race
+
+```{r s2_model1, echo=FALSE}
+# Column patterns for each metric (same as primary H1a analysis)
+metrics <- list(
+  FA = "\\.fa1\\.mean$",
+  MD = "\\.tensor1\\.meandiffusivity\\.mean$",
+  AD = "\\.tensor1\\.maxeigenvalue\\.mean$",
+  RD = "\\.tensor1\\.mineigenvalue\\.mean$"
+)
+
+# Run all four metrics with race added as a continuous covariate, then join
+results_m1 <- imap(metrics, function(pattern, metric) {
+  fit_wm(dat, pattern,
+         covars_cont = c("age", "race"),
+         covars_cat  = "gender") |>
+    rename_with(~ paste0(metric, "_", .x), .cols = -tract)
+}) |>
+  reduce(left_join, by = "tract")
+
+tbl_s2a <- make_s2_table(
+  results_m1,
+  table_label = "Table S2a.",
+  covar_note  = "age, gender, and race",
+  n           = nrow(dat)
+)
+
+tbl_s2a
+
+gtsave(tbl_s2a,
+       here("output", "tables", "supplementary", "TableS2a_CTQ_WM_Race.html"))
+```
+
+---
+
+## Model 2: Age, Gender, Race, Alcohol Use
+
+```{r s2_model2, echo=FALSE}
+# Run all four metrics with race and alcohol use added as continuous covariates
+results_m2 <- imap(metrics, function(pattern, metric) {
+  fit_wm(dat, pattern,
+         covars_cont = c("age", "race", "audit_10_score"),
+         covars_cat  = "gender") |>
+    rename_with(~ paste0(metric, "_", .x), .cols = -tract)
+}) |>
+  reduce(left_join, by = "tract")
+
+tbl_s2b <- make_s2_table(
+  results_m2,
+  table_label = "Table S2b.",
+  covar_note  = "age, gender, race, and alcohol use (AUDIT-10)",
+  n           = nrow(dat)
+)
+
+tbl_s2b
+
+gtsave(tbl_s2b,
+       here("output", "tables", "supplementary", "TableS2b_CTQ_WM_RaceAlcohol.html"))
+```
+
+---
+
+# Table S5: Robustness to Heteroscedasticity — HC3 SEs and BCa Bootstrap CIs
+
+> *Methods (Table S5):* To evaluate whether the primary H1a results are robust
+> to heteroscedasticity, all regressions were re-estimated using
+> heteroskedasticity-consistent (HC3) standard errors (MacKinnon & White, 1985)
+> and bias-corrected accelerated (BCa) bootstrap 95% confidence intervals
+> (5,000 resamples, seed = 1234).
+>
+> For each WM metric, the table reports:
+>
+> - **beta (std):** standardised OLS regression coefficient for CTQ
+> - **t:** *t*-statistic from the unstandardised OLS model
+> - **p (OLS) / pFDR (OLS):** raw and FDR-corrected *p*-values from the standard OLS model
+> - **p (HC3) / pFDR (HC3):** raw and FDR-corrected *p*-values using HC3 standard errors
+> - **95% CI (HC3):** HC3-based confidence interval on the standardised beta
+> - **95% CI (BCa):** bias-corrected accelerated bootstrap CI on the standardised beta
+>
+> FDR correction (Benjamini–Hochberg) is applied separately within each
+> diffusion metric across **all model terms × 23 tracts**.
+>
+> - **Outcome (Y):** WM tract metric (FA, MD, AD, RD), 23 tracts each
+> - **Predictor (X):** CTQ total score
+> - **Covariates:** Age, gender
+> - **Output files:** `figs/df_regression_{fa,md,ad,rd}_hc3.bca.docx`
+
+---
+
+## Fractional Anisotropy (FA)
+
+```{r hc3_fa, echo=FALSE}
+fa_cols   <- paste0(tract_stems, metric_suffixes[["FA"]])
+fa_values <- as.matrix(dat[, fa_cols])
+colnames(fa_values) <- NULL          # broom::tidy() will label responses Y1..Y23
+fa_names  <- paste0("Y", seq_len(ncol(fa_values)))
+
+fa_ols     <- fit_ols_wm(fa_values, dat, "ctq_totalscore", "p.fdr.fa")
+lm_fa_out  <- fa_ols$out
+lm_fa_beta <- fa_ols$beta
+
+hc3_fa_std_ctq <- fit_hc3_bca(fa_values, fa_names, dat,
+                               predictor = "ctq_totalscore",
+                               R_boot    = 5000)
+
+fa_table_std <- build_hc3_table(lm_fa_out, lm_fa_beta, hc3_fa_std_ctq,
+                                tract_pretty, "p.fdr.fa")
+
+hc3_note <- paste0(
+  "OLS = ordinary least squares; HC3 = heteroskedasticity-consistent standard errors; ",
+  "BCa = bias-corrected and accelerated bootstrap; FDR = false-discovery rate; ",
+  "\u03b2 = standardised regression coefficient; CI = confidence interval. ",
+  "All models adjusted for age and gender. FDR correction applied across all model ",
+  "terms \u00d7 tracts."
+)
+
+tbl_fa <- make_gt(
+  fa_table_std,
+  caption = "Supplementary Table S5a. Multiple regression results for FA: CTQ and white matter microstructure with HC3 standard errors and BCa confidence intervals.",
+  note    = hc3_note
+)
+gtsave(tbl_fa, here("output", "tables", "supplementary", "TableS5a_HC3_FA.html"))
+tbl_fa
+```
+
+---
+
+## Mean Diffusivity (MD)
+
+```{r hc3_md, echo=FALSE}
+md_cols   <- paste0(tract_stems, metric_suffixes[["MD"]])
+md_values <- as.matrix(dat[, md_cols])
+colnames(md_values) <- NULL
+md_names  <- paste0("Y", seq_len(ncol(md_values)))
+
+md_ols     <- fit_ols_wm(md_values, dat, "ctq_totalscore", "p.fdr.md")
+lm_md_out  <- md_ols$out
+lm_md_beta <- md_ols$beta
+
+hc3_md_std_ctq <- fit_hc3_bca(md_values, md_names, dat,
+                               predictor = "ctq_totalscore",
+                               R_boot    = 5000)
+
+md_table_std <- build_hc3_table(lm_md_out, lm_md_beta, hc3_md_std_ctq,
+                                tract_pretty, "p.fdr.md")
+
+tbl_md <- make_gt(
+  md_table_std,
+  caption = "Supplementary Table S5b. Multiple regression results for MD: CTQ and white matter microstructure with HC3 standard errors and BCa confidence intervals.",
+  note    = hc3_note
+)
+gtsave(tbl_md, here("output", "tables", "supplementary", "TableS5b_HC3_MD.html"))
+tbl_md
+```
+
+---
+
+## Axial Diffusivity (AD)
+
+```{r hc3_ad, echo=FALSE}
+ad_cols   <- paste0(tract_stems, metric_suffixes[["AD"]])
+ad_values <- as.matrix(dat[, ad_cols])
+colnames(ad_values) <- NULL
+ad_names  <- paste0("Y", seq_len(ncol(ad_values)))
+
+ad_ols     <- fit_ols_wm(ad_values, dat, "ctq_totalscore", "p.fdr.ad")
+lm_ad_out  <- ad_ols$out
+lm_ad_beta <- ad_ols$beta
+
+hc3_ad_std_ctq <- fit_hc3_bca(ad_values, ad_names, dat,
+                               predictor = "ctq_totalscore",
+                               R_boot    = 5000)
+
+ad_table_std <- build_hc3_table(lm_ad_out, lm_ad_beta, hc3_ad_std_ctq,
+                                tract_pretty, "p.fdr.ad")
+
+tbl_ad <- make_gt(
+  ad_table_std,
+  caption = "Supplementary Table S5c. Multiple regression results for AD: CTQ and white matter microstructure with HC3 standard errors and BCa confidence intervals.",
+  note    = hc3_note
+)
+gtsave(tbl_ad, here("output", "tables", "supplementary", "TableS5c_HC3_AD.html"))
+tbl_ad
+```
+
+---
+
+## Radial Diffusivity (RD)
+
+```{r hc3_rd, echo=FALSE}
+rd_cols   <- paste0(tract_stems, metric_suffixes[["RD"]])
+rd_values <- as.matrix(dat[, rd_cols])
+colnames(rd_values) <- NULL
+rd_names  <- paste0("Y", seq_len(ncol(rd_values)))
+
+rd_ols     <- fit_ols_wm(rd_values, dat, "ctq_totalscore", "p.fdr.rd")
+lm_rd_out  <- rd_ols$out
+lm_rd_beta <- rd_ols$beta
+
+hc3_rd_std_ctq <- fit_hc3_bca(rd_values, rd_names, dat,
+                               predictor = "ctq_totalscore",
+                               R_boot    = 5000)
+
+rd_table_std <- build_hc3_table(lm_rd_out, lm_rd_beta, hc3_rd_std_ctq,
+                                tract_pretty, "p.fdr.rd")
+
+tbl_rd <- make_gt(
+  rd_table_std,
+  caption = "Supplementary Table S5d. Multiple regression results for RD: CTQ and white matter microstructure with HC3 standard errors and BCa confidence intervals.",
+  note    = hc3_note
+)
+gtsave(tbl_rd, here("output", "tables", "supplementary", "TableS5d_HC3_RD.html"))
+tbl_rd
+```
+
+---
+
+# Table S6: Sensitivity Analysis — Excluding PTSD-Only Subgroup
+
+```{r noptsd_setup, include=FALSE}
+# Exclude participants whose only diagnosis is PTSD (no mTBI or HC).
+# This checks whether the small PTSD-only subgroup unduly influences results.
+df_no.ptsd <- subset(dat, hc.ptsd.mtbi.groups.4groups != "PTSD-only")
+
+# Re-state type coercions explicitly so this chunk is self-contained.
+df_no.ptsd$ctq_totalscore <- as.numeric(df_no.ptsd$ctq_totalscore)
+df_no.ptsd$age             <- as.numeric(df_no.ptsd$age)
+df_no.ptsd$gender          <- as.numeric(df_no.ptsd$gender)
+```
+
+> *Methods (Table S6):* The primary H1a regressions are repeated after excluding
+> the PTSD-only subgroup (*n* = `r nrow(dat) - nrow(df_no.ptsd)`) to verify that
+> this  group does not disproportionately drive the main findings.
+>
+> - **Outcome (Y):** WM tract metric (FA, MD, AD, RD), 23 tracts each
+> - **Predictor (X):** CTQ total score
+> - **Covariates:** Age, gender
+> - **Exclusion criterion:** `hc.ptsd.mtbi.groups.4groups == "PTSD-only"`
+> - **Output file:** `figs/df_no_ptsd_table.docx`
+
+---
+
+## FA
+
+```{r noptsd_fa, echo=FALSE}
+fa_values <- as.matrix(df_no.ptsd[, paste0(tract_stems, metric_suffixes[["FA"]])])
+colnames(fa_values) <- NULL
+
+fa_ols       <- fit_ols_wm(fa_values, df_no.ptsd, "ctq_totalscore", "p.fdr.fa")
+lm_fa        <- fa_ols$out
+lm_fa_scaled <- fa_ols$beta
+```
+
+## MD
+
+```{r noptsd_md, echo=FALSE}
+md_values <- as.matrix(df_no.ptsd[, paste0(tract_stems, metric_suffixes[["MD"]])])
+colnames(md_values) <- NULL
+
+md_ols       <- fit_ols_wm(md_values, df_no.ptsd, "ctq_totalscore", "p.fdr.md")
+lm_md        <- md_ols$out
+lm_md_scaled <- md_ols$beta
+```
+
+## AD
+
+```{r noptsd_ad, echo=FALSE}
+ad_values <- as.matrix(df_no.ptsd[, paste0(tract_stems, metric_suffixes[["AD"]])])
+colnames(ad_values) <- NULL
+
+ad_ols       <- fit_ols_wm(ad_values, df_no.ptsd, "ctq_totalscore", "p.fdr.ad")
+lm_ad        <- ad_ols$out
+lm_ad_scaled <- ad_ols$beta
+```
+
+## RD
+
+```{r noptsd_rd, echo=FALSE}
+rd_values <- as.matrix(df_no.ptsd[, paste0(tract_stems, metric_suffixes[["RD"]])])
+colnames(rd_values) <- NULL
+
+rd_ols       <- fit_ols_wm(rd_values, df_no.ptsd, "ctq_totalscore", "p.fdr.rd")
+lm_rd        <- rd_ols$out
+lm_rd_scaled <- rd_ols$beta
+```
+
+## Results Table (Table S6)
+
+```{r noptsd_merge_p, echo=FALSE}
+# Join FDR-corrected p-values across metrics
+lm_fa_sel <- lm_fa |> dplyr::select(response, p.fdr.fa)
+lm_md_sel <- lm_md |> dplyr::select(response, p.fdr.md)
+lm_ad_sel <- lm_ad |> dplyr::select(response, p.fdr.ad)
+lm_rd_sel <- lm_rd |> dplyr::select(response, p.fdr.rd)
+
+df_combined <- full_join(lm_fa_sel, lm_md_sel, by = "response") |>
+  full_join(lm_ad_sel, by = "response") |>
+  full_join(lm_rd_sel, by = "response") |>
+  dplyr::mutate(response = tract_pretty[response])
+
+names(df_combined) <- c("White matter tracts",
+                        "FA p-value (FDR-corrected)",
+                        "MD p-value (FDR-corrected)",
+                        "AD p-value (FDR-corrected)",
+                        "RD p-value (FDR-corrected)")
+```
+
+```{r noptsd_merge_beta, echo=FALSE}
+df_combined_scaled <- full_join(lm_fa_scaled, lm_md_scaled, by = "response") |>
+  full_join(lm_ad_scaled, by = "response") |>
+  full_join(lm_rd_scaled, by = "response") |>
+  dplyr::mutate(response = tract_pretty[response])
+
+names(df_combined_scaled) <- c("White matter tracts",
+                               "FA beta", "MD beta", "AD beta", "RD beta")
+
+# Combine FDR-corrected p-values and standardised betas; order columns by metric
+df_combined_full <- full_join(df_combined, df_combined_scaled,
+                              by = "White matter tracts") |>
+  dplyr::select(contains("White matter tracts"),
+                contains("FA"), contains("MD"),
+                contains("AD"), contains("RD"))
+
+tbl_s6 <- df_combined_full |>
+  gt() |>
+  tab_header(
+    title = html(paste0(
+      "<b>Supplementary Table S6.</b> Multiple regression results between CTQ total score ",
+      "and white matter microstructure, excluding PTSD-only participants (N = ",
+      nrow(df_no.ptsd), ")."
+    ))
+  ) |>
+  tab_style(
+    style     = cell_text(align = "left"),
+    locations = cells_title(groups = "title")
+  ) |>
+  tab_spanner(label = md("**FA**"), columns = c(`FA p-value (FDR-corrected)`, `FA beta`)) |>
+  tab_spanner(label = md("**MD**"), columns = c(`MD p-value (FDR-corrected)`, `MD beta`)) |>
+  tab_spanner(label = md("**AD**"), columns = c(`AD p-value (FDR-corrected)`, `AD beta`)) |>
+  tab_spanner(label = md("**RD**"), columns = c(`RD p-value (FDR-corrected)`, `RD beta`)) |>
+  cols_label(
+    `White matter tracts`        = "",
+    `FA p-value (FDR-corrected)` = html("<i>p</i><sub>FDR</sub>"),
+    `FA beta`                    = html("\u03b2"),
+    `MD p-value (FDR-corrected)` = html("<i>p</i><sub>FDR</sub>"),
+    `MD beta`                    = html("\u03b2"),
+    `AD p-value (FDR-corrected)` = html("<i>p</i><sub>FDR</sub>"),
+    `AD beta`                    = html("\u03b2"),
+    `RD p-value (FDR-corrected)` = html("<i>p</i><sub>FDR</sub>"),
+    `RD beta`                    = html("\u03b2")
+  ) |>
+  fmt_number(columns = c(`FA beta`, `MD beta`, `AD beta`, `RD beta`), decimals = 3) |>
+  text_transform(
+    locations = cells_body(columns = c(`FA beta`, `MD beta`, `AD beta`, `RD beta`)),
+    fn = function(x) {
+      x <- sub("^0\\.",       ".",       x)   # 0.xxx  -> .xxx
+      x <- sub("^\u22120\\.", "\u2212.", x)   # −0.xxx -> −.xxx
+      x
+    }
+  ) |>
+  fmt_missing(columns = everything(), missing_text = "\u2014") |>
+  cols_align(align = "left",   columns = `White matter tracts`) |>
+  cols_align(align = "center", columns = -`White matter tracts`) |>
+  tab_options(
+    table.font.size                   = "small",
+    source_notes.font.size            = "small",
+    data_row.padding                  = px(2),
+    heading.border.bottom.style       = "hidden",
+    table.border.top.style            = "solid",
+    table.border.bottom.style         = "solid",
+    column_labels.border.top.style    = "solid",
+    column_labels.border.bottom.style = "solid",
+    table_body.border.bottom.style    = "solid"
+  ) |>
+  tab_source_note(source_note = html(paste0(
+    "<i>Note.</i> Higher CTQ scores were significantly associated with lower mean diffusivity ",
+    "and axial diffusivity in various white matter tracts. No significant associations were ",
+    "found for fractional anisotropy or radial diffusivity. All analyses were adjusted for ",
+    "age and gender. FA, fractional anisotropy; MD, mean diffusivity; AD, axial diffusivity; ",
+    "RD, radial diffusivity; FDR, false-discovery rate; AF, arcuate fasciculus; CB, cingulum ",
+    "bundle; CC, corpus callosum; ILF, inferior longitudinal fasciculus; IoFF, inferior ",
+    "occipito-frontal fasciculus; SLF, superior longitudinal fasciculus; UF, uncinate fasciculus."
+  )))
+
+gtsave(tbl_s6, here("output", "tables", "supplementary", "TableS6_Sensitivity_NoPTSD.html"))
+tbl_s6
+```
+
+---
+
+# Table S12: CTQ Subscale Analyses — MD and AD
+
+> *Methods (Table S12):* To identify which aspects of childhood maltreatment drive
+> the primary MD and AD associations, analyses were repeated with each CTQ subscale
+> as the predictor in place of the total score.
+>
+> - **Outcome (Y):** MD tracts (significant in primary analysis) and AD tracts (significant in primary analysis)
+> - **Predictors (X):** Five CTQ subscales — emotional neglect, physical neglect, emotional abuse, physical abuse, sexual abuse
+> - **Covariates:** Age, gender
+> - **FDR correction:** Benjamini–Hochberg within each metric × subscale combination
+
+---
+
+## Analysis
+
+```{r s12_analysis, echo=FALSE}
+# CTQ subscales: name = display label, value = column in dat
+subscales <- list(
+  "Emotional neglect" = "ctq_emoneg_score",
+  "Physical neglect"  = "ctq_physneg_score",
+  "Emotional abuse"   = "ctq_emo_score",
+  "Physical abuse"    = "ctq_phys_score",
+  "Sexual abuse"      = "ctq_sex_score"
+)
+
+# Short prefixes for column naming (order matches subscales list)
+subscale_keys <- c("en", "pn", "ea", "pa", "sa")
+
+md_pattern <- "\\.tensor1\\.meandiffusivity\\.mean$"
+ad_pattern <- "\\.tensor1\\.maxeigenvalue\\.mean$"
+
+# Significant-tract subsets (from primary analysis), fixed order as in Table S12
+sig_md_tracts <- c(
+  "AF right", "CC 1", "CC 2", "CC 6",
+  "ILF right", "IoFF left", "IoFF right", "UF right"
+)
+
+sig_ad_tracts <- c(
+  "AF left", "AF right", "CB right",
+  "CC 2", "CC 3", "CC 4", "CC 5", "CC 6",
+  "IoFF left", "SLF I left", "SLF I right",
+  "SLF II left", "SLF II right", "SLF III right", "UF right"
+)
+
+# run_subscale_wide(): Run fit_wm() for all 5 subscales on one metric, return
+# wide tibble (tract + 2 cols per subscale: <key>_pfdr, <key>_beta).
+# Filtered to sig_tracts before returning.
+run_subscale_wide <- function(metric_pattern, sig_tracts) {
+  imap(subscales, function(col, label) {
+    key <- subscale_keys[match(label, names(subscales))]
+    fit_wm(dat, metric_pattern, predictor = col) %>%
+      select(tract, p_fdr, beta) %>%
+      rename(!!paste0(key, "_pfdr") := p_fdr,
+             !!paste0(key, "_beta") := beta)
+  }) %>%
+    reduce(left_join, by = "tract") %>%
+    filter(tract %in% sig_tracts) %>%
+    slice(match(sig_tracts, tract))
+}
+
+md_wide <- run_subscale_wide(md_pattern, sig_md_tracts) %>%
+  mutate(group = "MD", .before = tract)
+ad_wide <- run_subscale_wide(ad_pattern, sig_ad_tracts) %>%
+  mutate(group = "AD", .before = tract)
+
+results_s12 <- bind_rows(md_wide, ad_wide)
+```
+
+## Results Table (Table S12)
+
+```{r s12_table, echo=FALSE}
+pfdr_cols <- paste0(subscale_keys, "_pfdr")
+beta_cols  <- paste0(subscale_keys, "_beta")
+num_cols   <- c(pfdr_cols, beta_cols)
+
+# Capture bold row indices from numeric data BEFORE character conversion
+bold_idx <- lapply(subscale_keys, function(k) which(results_s12[[paste0(k, "_pfdr")]] < 0.05))
+names(bold_idx) <- subscale_keys
+
+# Format numeric columns to 3-decimal character strings with leading-zero stripped
+fmt3 <- function(x) {
+  s <- formatC(x, digits = 3, format = "f")
+  s <- sub("^0\\.",   ".",  s)
+  s <- sub("^-0\\.", "-.", s)
+  s
+}
+
+results_display <- results_s12 %>%
+  mutate(across(all_of(num_cols), fmt3))
+
+tbl_s12 <- results_display |>
+  gt(groupname_col = "group") |>
+  tab_header(
+    title = html(paste0(
+      "<b>Supplementary Table S12.</b> Multiple regression results using childhood maltreatment ",
+      "subtype as the criterion (N = ", nrow(dat), ")."
+    ))
+  ) |>
+  tab_style(
+    style     = cell_text(align = "left"),
+    locations = cells_title(groups = "title")
+  ) |>
+  tab_style(
+    style     = cell_text(weight = "bold"),
+    locations = cells_row_groups()
+  ) |>
+  # ── Subscale column spanners ──────────────────────────────────────────────
+  tab_spanner(label = md(paste0("**", names(subscales)[1], "**")),
+              columns = c(en_pfdr, en_beta)) |>
+  tab_spanner(label = md(paste0("**", names(subscales)[2], "**")),
+              columns = c(pn_pfdr, pn_beta)) |>
+  tab_spanner(label = md(paste0("**", names(subscales)[3], "**")),
+              columns = c(ea_pfdr, ea_beta)) |>
+  tab_spanner(label = md(paste0("**", names(subscales)[4], "**")),
+              columns = c(pa_pfdr, pa_beta)) |>
+  tab_spanner(label = md(paste0("**", names(subscales)[5], "**")),
+              columns = c(sa_pfdr, sa_beta)) |>
+  # ── Sub-column labels ─────────────────────────────────────────────────────
+  cols_label(
+    tract   = "",
+    en_pfdr = html("<i>p</i><sub>FDR</sub>"), en_beta = html("\u03b2"),
+    pn_pfdr = html("<i>p</i><sub>FDR</sub>"), pn_beta = html("\u03b2"),
+    ea_pfdr = html("<i>p</i><sub>FDR</sub>"), ea_beta = html("\u03b2"),
+    pa_pfdr = html("<i>p</i><sub>FDR</sub>"), pa_beta = html("\u03b2"),
+    sa_pfdr = html("<i>p</i><sub>FDR</sub>"), sa_beta = html("\u03b2")
+  ) |>
+  # ── Bold significant pFDR + companion beta ────────────────────────────────
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_body(columns = c(en_pfdr, en_beta),
+                                   rows    = bold_idx[["en"]])) |>
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_body(columns = c(pn_pfdr, pn_beta),
+                                   rows    = bold_idx[["pn"]])) |>
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_body(columns = c(ea_pfdr, ea_beta),
+                                   rows    = bold_idx[["ea"]])) |>
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_body(columns = c(pa_pfdr, pa_beta),
+                                   rows    = bold_idx[["pa"]])) |>
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_body(columns = c(sa_pfdr, sa_beta),
+                                   rows    = bold_idx[["sa"]])) |>
+  # ── Alignment ─────────────────────────────────────────────────────────────
+  cols_align(align = "left",   columns = tract) |>
+  cols_align(align = "center", columns = all_of(num_cols)) |>
+  # ── APA options ───────────────────────────────────────────────────────────
+  tab_options(
+    table.font.size                   = "small",
+    source_notes.font.size            = "small",
+    data_row.padding                  = px(2),
+    heading.border.bottom.style       = "hidden",
+    table.border.top.style            = "solid",
+    table.border.bottom.style         = "solid",
+    column_labels.border.top.style    = "solid",
+    column_labels.border.bottom.style = "solid",
+    table_body.border.bottom.style    = "solid",
+    row_group.border.top.style        = "hidden",
+    row_group.border.bottom.style     = "hidden"
+  ) |>
+  tab_source_note(source_note = html(paste0(
+    "<i>Note.</i> CTQ, Childhood Trauma Questionnaire; FDR, false-discovery rate; ",
+    "MD, mean diffusivity; AD, axial diffusivity; AF, arcuate fasciculus; CB, cingulum ",
+    "bundle; CC, corpus callosum; ILF, inferior longitudinal fasciculus; IoFF, inferior ",
+    "occipito-frontal fasciculus; SLF, superior longitudinal fasciculus; UF, uncinate ",
+    "fasciculus. Additional regression analyses using CTQ subscales as independent variables ",
+    "highlighted the substantial contributions of emotional neglect and emotional abuse to ",
+    "the observed effects. All analyses were corrected for age and gender."
+  )))
+
+gtsave(tbl_s12, here("output", "tables", "supplementary", "TableS12_CTQ_Subscales.html"))
+tbl_s12
+```

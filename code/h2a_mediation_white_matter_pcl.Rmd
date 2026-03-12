@@ -1,0 +1,414 @@
+---
+title: "INTRuST CM — H2a: White Matter Mediating CTQ → PTSD Symptoms"
+author: "Luisa Berger"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+
+suppressPackageStartupMessages({
+  library(here)
+  library(tidyverse)
+  library(gt)
+})
+
+set.seed(654321)
+
+dat <- readr::read_csv(
+  here("data", "analysis_simulated.csv"),
+  show_col_types = FALSE,
+  name_repair = "minimal"
+)
+
+dat$gender <- as.numeric(dat$gender)
+dat$race   <- as.numeric(dat$race)
+
+source(here("code", "utils", "process.R"), echo = FALSE)
+```
+
+```{r define_mediators, include=FALSE}
+# Single source of truth for all mediators in this script.
+# Names  = human-readable tract labels used in the results table.
+# Values = the _1000 column names passed to run_mediation() and PROCESS.
+#
+# Scaling (below), analysis chunks, and the results table all derive from
+# these vectors — adding or removing a mediator requires editing one line here.
+
+md_mediators <- c(
+  "CC 6"         = "t_cc6.tensor1.meandiffusivity.mean_1000"
+)
+
+ad_mediators <- c(
+  "AF left"      = "t_af_left.tensor1.maxeigenvalue.mean_1000",
+  "CC 2"         = "t_cc2.tensor1.maxeigenvalue.mean_1000",
+  "CC 3"         = "t_cc3.tensor1.maxeigenvalue.mean_1000",
+  "CC 4"         = "t_cc4.tensor1.maxeigenvalue.mean_1000",
+  "CC 5"         = "t_cc5.tensor1.maxeigenvalue.mean_1000",
+  "CC 6"         = "t_cc6.tensor1.maxeigenvalue.mean_1000",
+  "SLF I left"   = "t_slf.i_left.tensor1.maxeigenvalue.mean_1000",
+  "SLF I right"  = "t_slf.i_right.tensor1.maxeigenvalue.mean_1000",
+  "SLF II left"  = "t_slf.ii_left.tensor1.maxeigenvalue.mean_1000",
+  "SLF II right" = "t_slf.ii_right.tensor1.maxeigenvalue.mean_1000"
+)
+```
+
+```{r scale_wm_columns, include=FALSE}
+# WM diffusion values rescaled × 1,000,000 for numerical stability in PROCESS (suffix "_1000").
+
+all_mediators <- c(md_mediators, ad_mediators)
+base_cols     <- sub("_1000$", "", all_mediators)
+
+missing_cols <- setdiff(base_cols, names(dat))
+if (length(missing_cols) > 0) {
+  stop("scale_wm_columns: the following expected columns are absent from the data:\n  ",
+       paste(missing_cols, collapse = "\n  "))
+}
+
+for (i in seq_along(all_mediators)) {
+  dat[[all_mediators[i]]] <- dat[[base_cols[i]]] * 1000000
+}
+```
+
+```{r helpers, include=FALSE}
+# parse_section(): extract numeric values from a named section of PROCESS output.
+parse_section <- function(out, keyword, min_vals = 4) {
+  # Anchor search after the "DIRECT AND INDIRECT EFFECTS" header to avoid false matches.
+  effects_hdr <- which(grepl("direct",   out, ignore.case = TRUE) &
+                       grepl("indirect", out, ignore.case = TRUE))
+  search_from <- if (length(effects_hdr) > 0) tail(effects_hdr, 1L) else 1L
+
+  local_idx <- grep(keyword, out[search_from:length(out)], fixed = TRUE)
+  if (length(local_idx) == 0) {
+    # Fallback: search full output in case section header format differs
+    local_idx <- grep(keyword, out, fixed = TRUE)
+    if (length(local_idx) == 0)
+      stop("parse_section: '", keyword, "' not found in PROCESS output.")
+    search_from <- 1L
+  }
+  abs_idx <- local_idx[1L] + search_from - 1L
+
+  for (i in seq(abs_idx + 1L, min(abs_idx + 20L, length(out)))) {
+    line  <- out[i]
+    if (is.na(line) || nchar(trimws(line)) == 0) next
+    nums  <- suppressWarnings(as.numeric(strsplit(trimws(line), "\\s+")[[1]]))
+    valid <- !is.na(nums)
+    if (sum(valid) >= min_vals) return(nums[valid])
+  }
+  context <- out[seq(abs_idx, min(abs_idx + 21L, length(out)))]
+  stop("parse_section: no data row found in '", keyword, "'.\nLines scanned:\n",
+       paste(context, collapse = "\n"))
+}
+
+# run_mediation(): run PROCESS Model 4 once, print output inline, return key effects as tibble.
+# Running each model once avoids doubling bootstrap computation (~10,000 iterations × 11 models).
+run_mediation <- function(dat, mediator, save = 0) {
+
+  # Run PROCESS once and capture all console output as a character vector.
+  out <- capture.output(
+    process(
+      data    = dat,
+      y       = "pcl_total",
+      x       = "ctq_totalscore",
+      m       = mediator,
+      cov     = c("age", "gender"),
+      effsize = 1,
+      total   = 1,
+      stand   = 1,
+      boot    = 10000,
+      modelbt = 1,
+      seed    = 654321,
+      save    = save,
+      model   = 4
+    )
+  )
+
+  cat(out, sep = "\n")  # re-print inline so the Analysis section output is unchanged
+
+  # Parse the three effect sections and return as a tibble (invisible so it
+  # doesn't print a second time in the chunk output).
+  total  <- parse_section(out, "Total effect of X on Y")
+  direct <- parse_section(out, "Direct effect of X on Y")
+  # Indirect effects: "Indirect effect(s) of X on Y" appears multiple times in
+  # PROCESS output, and so does "BootSE". Some of those pairings correspond to
+  # the M-model bootstrap table (constant ~1,250 when mediator is ×1e6-scaled)
+  # rather than the actual indirect-effects bootstrap CI table.
+  # Robust strategy: scan valid section pairings from LAST to FIRST; accept the
+  # first one whose data row has all 4 values with |x| < 10 (indirect effects
+  # and their bootstrap CIs are always small; M-model constants are not).
+  indir  <- local({
+    indir_lines <- grep("Indirect effect", out, ignore.case = TRUE)
+    indir_lines <- indir_lines[!grepl("Completely standardized", out[indir_lines], ignore.case = TRUE)]
+    if (length(indir_lines) == 0)
+      stop("run_mediation: 'Indirect effect' section not found in PROCESS output.")
+    for (sec_idx in rev(indir_lines)) {
+      window  <- out[seq(sec_idx + 1L, min(sec_idx + 5L, length(out)))]
+      if (!any(grepl("BootSE", window, fixed = TRUE))) next  # not a real section header
+      hdr_rel <- grep("BootSE", window, fixed = TRUE)[1L]
+      start   <- sec_idx + hdr_rel + 1L
+      for (i in seq(start, min(start + 10L, length(out)))) {
+        line  <- out[i]
+        if (is.na(line) || nchar(trimws(line)) == 0) next
+        nums  <- suppressWarnings(as.numeric(strsplit(trimws(line), "\\s+")[[1]]))
+        valid <- !is.na(nums)
+        vals  <- nums[valid]
+        if (length(vals) >= 4L) {
+          if (all(abs(vals) < 10)) return(vals)  # plausible indirect effect
+          break  # implausible (e.g., M-model constant); try previous section
+        }
+        break
+      }
+    }
+    stop("run_mediation: no plausible indirect-effects row found in PROCESS output.")
+  })
+
+  invisible(tibble(
+    b_c      = total[7],  t_c      = total[3],  p_c      = total[4],
+    b_cprime = direct[7], t_cprime = direct[3], p_cprime = direct[4],
+    b_ab     = indir[1],  se_ab    = indir[2],  llci     = indir[3],
+    ulci     = indir[4]
+  ))
+}
+```
+
+# Statistical Analysis
+
+> *Methods:* Mediation analyses explored whether WM microstructure mediates the associations between CM severity and PTSD or post-concussive symptom severity. All mediation analyses were conducted using R PROCESS macro (version 4, model 4; Hayes, 2022), which employs non-parametric bootstrapping with *N* = 10,000 permutations to generate 95% bias-corrected confidence intervals. The dMRI measures that showed significant associations with CM severity in H1a (FDR *p* < .05) were included as mediators. CM severity (CTQ total score) was the independent variable in all models, and PCL-5 score was the dependent variable.
+
+- **Outcome (Y):** PCL-5 total score
+- **Predictor (X):** CTQ total score
+- **Mediator (M):** WM tract metric (MD or AD)
+- **Covariates:** Age, gender
+
+---
+
+# Analysis
+
+## Mean Diffusivity (MD)
+
+### MD — CC 6
+
+```{r mediation_MD_CC6, echo=FALSE}
+# save = 1 retains bootstrap samples for this primary MD model.
+r_md_cc6 <- run_mediation(dat, md_mediators[["CC 6"]], save = 1)
+```
+
+---
+
+## Axial Diffusivity (AD)
+
+### AD — AF left
+
+```{r mediation_AD_AF_left, echo=FALSE}
+r_ad_af_left <- run_mediation(dat, ad_mediators[["AF left"]])
+```
+
+### AD — CC 2
+
+```{r mediation_AD_CC2, echo=FALSE}
+r_ad_cc2 <- run_mediation(dat, ad_mediators[["CC 2"]])
+```
+
+### AD — CC 3
+
+```{r mediation_AD_CC3, echo=FALSE}
+r_ad_cc3 <- run_mediation(dat, ad_mediators[["CC 3"]])
+```
+
+### AD — CC 4
+
+```{r mediation_AD_CC4, echo=FALSE}
+r_ad_cc4 <- run_mediation(dat, ad_mediators[["CC 4"]])
+```
+
+### AD — CC 5
+
+```{r mediation_AD_CC5, echo=FALSE}
+r_ad_cc5 <- run_mediation(dat, ad_mediators[["CC 5"]])
+```
+
+### AD — CC 6
+
+```{r mediation_AD_CC6, echo=FALSE}
+r_ad_cc6 <- run_mediation(dat, ad_mediators[["CC 6"]])
+```
+
+### AD — SLF I left
+
+```{r mediation_AD_SLF_I_left, echo=FALSE}
+r_ad_slf_i_left <- run_mediation(dat, ad_mediators[["SLF I left"]])
+```
+
+### AD — SLF I right
+
+```{r mediation_AD_SLF_I_right, echo=FALSE}
+r_ad_slf_i_right <- run_mediation(dat, ad_mediators[["SLF I right"]])
+```
+
+### AD — SLF II left
+
+```{r mediation_AD_SLF_II_left, echo=FALSE}
+r_ad_slf_ii_left <- run_mediation(dat, ad_mediators[["SLF II left"]])
+```
+
+### AD — SLF II right
+
+```{r mediation_AD_SLF_II_right, echo=FALSE}
+r_ad_slf_ii_right <- run_mediation(dat, ad_mediators[["SLF II right"]])
+```
+
+---
+
+# Results
+
+```{r results_table, echo=FALSE}
+n_obs <- nrow(dat)
+
+# Assemble all stored mediation results; each r_* object is a one-row tibble
+# returned (invisibly) by run_mediation() above — no re-computation needed.
+# Tract labels come from the mediator vector names (single source of truth).
+med_results <- bind_rows(
+  r_md_cc6          %>% mutate(metric = "MD", tract = names(md_mediators["CC 6"])),
+  r_ad_af_left      %>% mutate(metric = "AD", tract = names(ad_mediators["AF left"])),
+  r_ad_cc2          %>% mutate(metric = "AD", tract = names(ad_mediators["CC 2"])),
+  r_ad_cc3          %>% mutate(metric = "AD", tract = names(ad_mediators["CC 3"])),
+  r_ad_cc4          %>% mutate(metric = "AD", tract = names(ad_mediators["CC 4"])),
+  r_ad_cc5          %>% mutate(metric = "AD", tract = names(ad_mediators["CC 5"])),
+  r_ad_cc6          %>% mutate(metric = "AD", tract = names(ad_mediators["CC 6"])),
+  r_ad_slf_i_left   %>% mutate(metric = "AD", tract = names(ad_mediators["SLF I left"])),
+  r_ad_slf_i_right  %>% mutate(metric = "AD", tract = names(ad_mediators["SLF I right"])),
+  r_ad_slf_ii_left  %>% mutate(metric = "AD", tract = names(ad_mediators["SLF II left"])),
+  r_ad_slf_ii_right %>% mutate(metric = "AD", tract = names(ad_mediators["SLF II right"]))
+) %>%
+  # Show metric label (MD/AD) only on the first row of each group, matching
+  # the manuscript table layout where the label functions as a row-span.
+  mutate(metric_label = if_else(!duplicated(metric), metric, ""))
+
+tbl_med <- med_results %>%
+  select(metric_label, tract,
+         b_c, t_c, p_c,
+         b_cprime, t_cprime, p_cprime,
+         b_ab, se_ab, llci, ulci) %>%
+  gt() %>%
+  tab_header(
+    title = html(paste0(
+      "<b>Table S3.</b> Mediation results of childhood maltreatment severity ",
+      "on PTSD symptom severity (<i>N</i> = ", n_obs, ")."
+    ))
+  ) %>%
+  tab_style(style = cell_text(align = "left"), locations = cells_title(groups = "title")) %>%
+  # ── column spanners (outer → inner for indirect effect) ─────────────────────
+  tab_spanner(
+    label   = html("<b>Total effect</b> (<i>c</i>)"),
+    columns = c(b_c, t_c, p_c)
+  ) %>%
+  tab_spanner(
+    label   = html("<b>Direct effect</b> (<i>c</i>&#x2032;)"),
+    columns = c(b_cprime, t_cprime, p_cprime)
+  ) %>%
+  # Inner spanner: CI sub-header nested inside the indirect effect spanner
+  tab_spanner(
+    label   = "Percentile bootstrap\n95% confidence interval",
+    columns = c(llci, ulci),
+    id      = "ci_span"
+  ) %>%
+  # Outer indirect effect spanner that wraps b_ab, se_ab, and the CI spanner
+  tab_spanner(
+    label    = html("<b>Indirect effect</b> (<i>ab</i>)"),
+    columns  = c(b_ab, se_ab),
+    spanners = "ci_span"
+  ) %>%
+  # ── column labels ────────────────────────────────────────────────────────────
+  cols_label(
+    metric_label = "",
+    tract        = "",
+    b_c          = html("<i>b</i><sub>c</sub>"),
+    t_c          = html("<i>t</i>-value"),
+    p_c          = html("<i>p</i>-value"),
+    b_cprime     = html("<i>b</i><sub>c&#x2032;</sub>"),
+    t_cprime     = html("<i>t</i>-value"),
+    p_cprime     = html("<i>p</i>-value"),
+    b_ab         = html("<i>b</i><sub>ab</sub>"),
+    se_ab        = "SE",
+    llci         = "Lower",
+    ulci         = "Upper"
+  ) %>%
+  # ── number formatting ────────────────────────────────────────────────────────
+  fmt_number(columns = -c(metric_label, tract), decimals = 3) %>%
+  # Strip leading zeros (0.xxx → .xxx; −0.xxx → −.xxx) and flag p = 0.000
+  # as "< .001" per APA convention (p cannot equal zero).
+  text_transform(
+    locations = cells_body(columns = c(p_c, p_cprime)),
+    fn = function(x) {
+      dplyr::case_when(
+        x == "0.000" ~ "< .001",
+        TRUE         ~ sub("^0\\.", ".", x)
+      )
+    }
+  ) %>%
+  text_transform(
+    locations = cells_body(columns = -c(metric_label, tract, p_c, p_cprime)),
+    fn = function(x) {
+      x <- sub("^0\\.",       ".",       x)   # 0.xxx  → .xxx
+      x <- sub("^\u22120\\.", "\u2212.", x)   # −0.xxx → −.xxx
+      x
+    }
+  ) %>%
+  # ── conditional bold ─────────────────────────────────────────────────────────
+  # Metric labels and tract names
+  tab_style(
+    style     = cell_text(weight = "bold"),
+    locations = cells_body(columns = c(metric_label, tract))
+  ) %>%
+  # Significant p-values (total and direct effects)
+  tab_style(
+    style     = cell_text(weight = "bold"),
+    locations = cells_body(columns = c(p_c, p_cprime), rows = p_c < 0.05)
+  ) %>%
+  # Indirect effect row when bootstrap CI excludes zero (significant mediation)
+  tab_style(
+    style     = cell_text(weight = "bold"),
+    locations = cells_body(columns = c(b_ab, se_ab, llci, ulci), rows = llci > 0)
+  ) %>%
+  # ── alignment ────────────────────────────────────────────────────────────────
+  cols_align(align = "left",   columns = c(metric_label, tract)) %>%
+  cols_align(align = "center", columns = -c(metric_label, tract)) %>%
+  # ── APA-style borders ────────────────────────────────────────────────────────
+  tab_options(
+    table.font.size                   = "small",
+    source_notes.font.size            = "small",
+    data_row.padding                  = px(2),
+    heading.border.bottom.style       = "hidden",
+    table.border.top.style            = "solid",
+    table.border.bottom.style         = "solid",
+    column_labels.border.top.style    = "solid",
+    column_labels.border.bottom.style = "solid",
+    table_body.border.bottom.style    = "solid"
+  ) %>%
+  # ── table note ───────────────────────────────────────────────────────────────
+  tab_source_note(
+    source_note = html(paste0(
+      "<i>Note.</i> MD, mean diffusivity; AD, axial diffusivity; CC, corpus callosum; ",
+      "SLF, superior longitudinal fasciculus; UF, uncinate fasciculus. ",
+      "The association between childhood maltreatment severity and PTSD symptom ",
+      "severity was partially mediated by mean diffusivity and axial diffusivity in ",
+      "various white matter tracts. All analyses were adjusted for age and gender as covariates."
+    ))
+  )
+
+tbl_med
+
+gtsave(tbl_med,
+       here("output", "tables", "supplementary", "TableS3_Mediation_PCL.html"))
+
+write.csv(
+  med_results %>% select(-metric_label),
+  here("output", "results", "main", "Mediation_WM_PCL_results.csv"),
+  row.names = FALSE
+)
+```

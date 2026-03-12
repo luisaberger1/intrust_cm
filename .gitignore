@@ -1,0 +1,16 @@
+# PROCESS macro (Hayes, 2022) — copyrighted, must be obtained from processmacro.org
+code/utils/process.R
+
+# R
+.Rhistory
+.RData
+.Rproj.user/
+renv/library/
+renv/staging/
+
+# Output (generated files — not tracked in version control)
+output/**
+!output/**/.gitkeep
+
+# macOS
+.DS_Store
