@@ -2,7 +2,7 @@
 
 ## Citation
 
-> Berger, L.†, Rojczyk, P.†, Seitz-Holland, J., Zhang, F., Pankatz, L., Sollmann, N., Kaufmann, E., Carrington, H., Puri, T., Coleman, M.J., Pasternak, O., Bouix, S., Rathi, Y., Cetin-Karayumak, S., O'Donnell, L.J., Falkai, P., George, M.S., McAllister, T.W., Zafonte, R., Stein, M.B., Shenton, M.E., & Koerte, I.K. (2025). The role of white matter microstructure in the association between childhood maltreatment and adult post-traumatic symptoms. *Molecular Psychiatry*. DOI: *to be updated upon publication*
+> Berger, L.†, Rojczyk, P.†, Seitz-Holland, J., Zhang, F., Pankatz, L., Sollmann, N., Kaufmann, E., Carrington, H., Puri, T., Coleman, M.J., Pasternak, O., Bouix, S., Rathi, Y., Cetin-Karayumak, S., O'Donnell, L.J., Falkai, P., George, M.S., McAllister, T.W., Zafonte, R., Stein, M.B., Shenton, M.E., & Koerte, I.K. (2026). The role of white matter microstructure in the association between childhood maltreatment and adult post-traumatic symptoms. *Molecular Psychiatry*. DOI: *to be updated upon publication*
 >
 > † Equal contribution
 
