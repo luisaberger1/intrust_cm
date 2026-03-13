@@ -2,7 +2,7 @@
 
 ## Citation
 
-> Berger, L.†, Rojczyk, P.†, Seitz-Holland, J., Zhang, F., Pankatz, L., Sollmann, N., Kaufmann, E., Carrington, H., Puri, T., Coleman, M.J., Pasternak, O., Bouix, S., Rathi, Y., Cetin-Karayumak, S., O'Donnell, L.J., Falkai, P., George, M.S., McAllister, T.W., Zafonte, R., Stein, M.B., Shenton, M.E., & Koerte, I.K. (2026). The role of white matter microstructure in the association between childhood maltreatment and adult post-traumatic symptoms. *Molecular Psychiatry*. DOI: *to be updated upon publication*
+> Berger, L.†, Rojczyk, P.†, Seitz-Holland, J., Zhang, F., Pankatz, L., Sollmann, N., Kaufmann, E., Carrington, H., Puri, T., Coleman, M.J., Pasternak, O., Bouix, S., Rathi, Y., Cetin-Karayumak, S., O'Donnell, L.J., Falkai, P., George, M.S., McAllister, T.W., Zafonte, R., Stein, M.B., Shenton, M.E., & Koerte, I.K. (2026). The role of white matter microstructure in the association between childhood maltreatment and adult post-traumatic symptoms. *Molecular Psychiatry*. DOI: https://doi.org/10.5281/zenodo.18985847
 >
 > † Equal contribution
 
@@ -12,7 +12,7 @@ If you use this code, please cite the above manuscript.
 
 ## Overview
 
-This repository contains the analysis code and simulated data for the above manuscript. We examined diffusion MRI parameters across white matter tracts in relation to childhood maltreatment severity in the INTRuST cohort. Analyses included multiple regression, moderation by PTSD/mTBI diagnosis, and mediation models testing white matter microstructure as a neurobiological pathway to post-traumatic symptoms.
+This repository contains the analysis code and synthetic data for the above manuscript. We examined diffusion MRI parameters across white matter tracts in relation to childhood maltreatment severity in the INTRuST cohort. Analyses included multiple regression, moderation by PTSD/mTBI diagnosis, and mediation models testing white matter microstructure as a neurobiological pathway to post-traumatic symptoms.
 
 ---
 
